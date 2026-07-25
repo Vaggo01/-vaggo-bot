@@ -4,7 +4,8 @@
   "owner_usernames": ["vagdar1"],
   "channel_id": "@Vaggo01",
   "channel_username": "Vaggo01",
-  "discussion_group_id": 0,
+  "channel_numeric_id": -1004445937686,
+  "discussion_group_id": -1004496516466,
   "proxy_url": "",
 
   "brain": "auto",

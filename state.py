@@ -20,15 +20,18 @@ DEFAULT_OWNER_USERNAMES = ["vagdar1"]
 DEFAULT_CHANNEL_ID = "@Vaggo01"
 DEFAULT_CHANNEL_USERNAME = "Vaggo01"
 DEFAULT_CHANNEL_NUMERIC = -1004445937686
+# linked discussion for @Vaggo01 (комменты канала)
+DEFAULT_DISCUSSION_GROUP_ID = -1004496516466
 
 
 def load_config() -> dict:
     """
     config.json + оверлей из env (удобно для 24/7 в облаке):
       BOT_TOKEN / TELEGRAM_BOT_TOKEN
-      CHANNEL_ID, CHANNEL_USERNAME
+      CHANNEL_ID, CHANNEL_USERNAME, DISCUSSION_GROUP_ID
       OWNER_USER_IDS  (через запятую: 123,456)
       PROXY_URL
+      GROK_BRIDGE_URL / GROK_BRIDGE_SECRET / XAI_API_KEY
     """
     import os
 
@@ -62,6 +65,18 @@ def load_config() -> dict:
     proxy = (os.environ.get("PROXY_URL") or "").strip()
     if proxy:
         cfg["proxy_url"] = proxy
+    # discussion group (комменты) — критично для Bothost без полного config.json
+    disc_env = (
+        os.environ.get("DISCUSSION_GROUP_ID")
+        or os.environ.get("DISCUSSION_ID")
+        or os.environ.get("GROUP_ID")
+        or ""
+    ).strip()
+    if disc_env:
+        try:
+            cfg["discussion_group_id"] = int(disc_env)
+        except Exception:
+            pass
     # Grok Super bridge (домашний ПК)
     bru = (os.environ.get("GROK_BRIDGE_URL") or "").strip()
     if bru:
@@ -150,6 +165,39 @@ def load_config() -> dict:
         )
     except Exception:
         cfg["channel_numeric_id"] = DEFAULT_CHANNEL_NUMERIC
+
+    # discussion group — без этого Bothost видит ЛС, но МОЛЧИТ в комментах
+    try:
+        disc = int(cfg.get("discussion_group_id") or 0)
+    except Exception:
+        disc = 0
+    if not disc:
+        disc = DEFAULT_DISCUSSION_GROUP_ID
+    cfg["discussion_group_id"] = disc
+
+    # канальные AI-фичи: на cloud без config.json не выключать «случайно»
+    for k, default in (
+        ("auto_reply_comments", True),
+        ("auto_react_comments", True),
+        ("auto_react_posts", True),
+        ("auto_seed_comment", True),
+        ("comment_needs_owner_ok", False),
+        ("chat_mod_enabled", True),
+        ("paused", False),
+        ("use_grok_session", True),
+        ("brain", "auto"),
+        ("grok_tools", True),
+        ("grok_web_search", True),
+        ("grok_x_search", True),
+    ):
+        if k not in cfg or cfg.get(k) is None:
+            cfg[k] = default
+
+    # secret для bridge — дефолт только если пусто (Bothost env перекрывает)
+    if not (cfg.get("grok_bridge_secret") or "").strip():
+        env_sec = (os.environ.get("GROK_BRIDGE_SECRET") or "").strip()
+        if env_sec:
+            cfg["grok_bridge_secret"] = env_sec
 
     if not (cfg.get("bot_token") or "").strip():
         raise FileNotFoundError(
