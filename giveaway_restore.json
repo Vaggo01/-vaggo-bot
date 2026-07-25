@@ -18,7 +18,7 @@
       "hours": 50,
       "created_at": 1784293727,
       "starts_at": 1784293727,
-      "ends_at": 1784817000,
+      "ends_at": 1785445140,
       "channel_message_id": 102,
       "discuss_root_id": null,
       "entries": {
@@ -129,7 +129,8 @@
       "drawn_at": null,
       "min_complete": 10,
       "extend_hours": 24,
-      "extend_count": 0
+      "extend_count": 0,
+      "manual_deadline": "2026-07-30"
     },
     "8143749f0d": {
       "id": "8143749f0d",

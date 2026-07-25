@@ -42,7 +42,13 @@ def get_me(cfg: dict) -> dict:
 
 
 def get_updates(cfg: dict, offset: int | None = None, timeout: int = 25) -> list:
-    data: dict[str, Any] = {"timeout": timeout, "allowed_updates": json.dumps(["message", "callback_query", "channel_post"])}
+    data: dict[str, Any] = {
+        "timeout": timeout,
+        # channel_post — реакции/сид; message — комменты discussion
+        "allowed_updates": json.dumps(
+            ["message", "callback_query", "channel_post", "edited_channel_post"]
+        ),
+    }
     if offset is not None:
         data["offset"] = offset
     return api(cfg, "getUpdates", data=data, timeout=timeout + 10) or []
@@ -463,6 +469,10 @@ ALLOWED_REACTIONS = {
 }
 
 
+# На части каналов доступен урезанный набор — эти обычно проходят
+SAFE_CHANNEL_REACTIONS = ("🔥", "👍", "🥰", "😂", "🤔", "💯", "👏", "🎉", "🤩", "🙏")
+
+
 def set_message_reaction(
     cfg: dict,
     chat_id: int | str,
@@ -471,26 +481,62 @@ def set_message_reaction(
     *,
     big: bool = False,
 ) -> dict:
-    """Поставить реакцию ботом на сообщение (канал / группа / личка)."""
+    """Поставить реакцию ботом. При REACTION_INVALID — fallback на 🔥/👍."""
     emoji = (emoji or "🔥").strip()
     # нормализация частых вариантов
-    if emoji in ("❤️", "♥"):
+    if emoji in ("❤️", "♥", "♥️"):
         emoji = "❤"
     if emoji not in ALLOWED_REACTIONS:
         emoji = "🔥"
-    reaction = json.dumps([{"type": "emoji", "emoji": emoji}])
-    data = {
-        "chat_id": chat_id,
-        "message_id": int(message_id),
-        "reaction": reaction,
-        "is_big": "true" if big else "false",
-    }
-    try:
+
+    def _try(chat: int | str, emo: str) -> dict:
+        reaction = json.dumps([{"type": "emoji", "emoji": emo}])
+        data = {
+            "chat_id": chat,
+            "message_id": int(message_id),
+            "reaction": reaction,
+            "is_big": "true" if big else "false",
+        }
         return api(cfg, "setMessageReaction", data=data)
-    except Exception:
-        # повтор с numeric channel id
-        num = cfg.get("channel_numeric_id")
-        if num and str(chat_id) != str(num):
-            data["chat_id"] = num
-            return api(cfg, "setMessageReaction", data=data)
-        raise
+
+    chats: list[int | str] = [chat_id]
+    num = cfg.get("channel_numeric_id")
+    if num is not None and str(chat_id) != str(num):
+        chats.append(num)
+    un = (cfg.get("channel_username") or cfg.get("channel_id") or "").lstrip("@")
+    if un and str(chat_id).lstrip("@").lower() != un.lower():
+        chats.append(f"@{un}" if not str(un).startswith("@") else un)
+
+    # порядок эмодзи: запрошенный → дефолт канала → safe
+    emos: list[str] = []
+    for e in (
+        emoji,
+        (cfg.get("channel_react_emoji") or "🔥"),
+        "🔥",
+        "👍",
+        "🥰",
+        "🤔",
+    ):
+        e = (e or "🔥").strip()
+        if e not in emos:
+            emos.append(e)
+
+    last_err: Exception | None = None
+    for chat in chats:
+        for emo in emos:
+            try:
+                return _try(chat, emo)
+            except Exception as e:
+                last_err = e
+                err = str(e).lower()
+                if "reaction_invalid" in err or "reactions_too_many" in err:
+                    continue
+                if "retry after" in err or "too many requests" in err:
+                    raise
+                # wrong chat id — try next chat
+                if "chat not found" in err or "message to react not found" in err:
+                    break
+                continue
+    if last_err:
+        raise last_err
+    raise RuntimeError("setMessageReaction failed")

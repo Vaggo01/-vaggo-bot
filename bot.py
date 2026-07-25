@@ -77,8 +77,8 @@ except ImportError:  # pragma: no cover
     print("WARN: chat_mod_lib missing — chat moderation disabled", flush=True)
 
 _last_queue_tick = 0.0
-# 4.6.4 — auto bridge rediscover if URL dead; default secret; channel AI on Bothost
-BOT_CODE_VERSION = "4.6.4"
+# 4.6.5 — channel reactions: safe emoji fallback + react via discussion forward
+BOT_CODE_VERSION = "4.6.5"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:
@@ -2387,46 +2387,72 @@ def _log_comment_event(state: dict, event: dict) -> None:
     save_state(state)
 
 
+def _channel_ids_match(cfg: dict, chat_id, uname: str = "") -> bool:
+    """Сверить id/username канала (int/str не должны ломать фильтр)."""
+    ch_user = (cfg.get("channel_username") or "Vaggo01").lower().lstrip("@")
+    uname = (uname or "").lower().lstrip("@")
+    if uname and uname == ch_user:
+        return True
+    try:
+        cid = int(chat_id)
+    except Exception:
+        cid = None
+    try:
+        ch_num = int(cfg.get("channel_numeric_id") or 0) or None
+    except Exception:
+        ch_num = None
+    if ch_num and cid and cid == ch_num:
+        return True
+    ch_id = str(cfg.get("channel_id") or "").strip()
+    if ch_id and str(chat_id) == ch_id:
+        return True
+    if ch_id.startswith("@") and uname and uname == ch_id.lstrip("@").lower():
+        return True
+    # публичный канал без username в апдейте — если numeric совпал выше; иначе нет
+    return False
+
+
 def maybe_react_channel_post(cfg: dict, state: dict, post: dict) -> None:
-    """Реакция (+ опционально авто-коммент) на каждый новый пост канала."""
+    """Реакция на каждый новый пост канала."""
     if cfg.get("paused"):
+        return
+    if not cfg.get("auto_react_posts", True):
         return
     chat = post.get("chat") or {}
     chat_id = chat.get("id")
     mid = post.get("message_id")
     if not chat_id or not mid:
         return
-    ch_num = cfg.get("channel_numeric_id")
-    ch_user = (cfg.get("channel_username") or "Vaggo01").lower()
     uname = (chat.get("username") or "").lower()
-    if ch_num and chat_id != ch_num:
-        if uname and uname != ch_user:
-            return
-        if not uname:
-            return
-    elif uname and uname != ch_user and chat_id != ch_num:
+    if not _channel_ids_match(cfg, chat_id, uname):
         return
 
     text = (post.get("text") or post.get("caption") or "")[:300]
-    key = f"reacted_{chat_id}_{mid}"
-    if cfg.get("auto_react_posts", True) and not state.get(key):
-        emoji = cfg.get("channel_react_emoji") or pick_reaction_for_text(text) or "🔥"
-        try:
-            tg.set_message_reaction(cfg, chat_id, int(mid), emoji)
-            state[key] = int(time.time())
-            keys = [k for k in state if str(k).startswith("reacted_")]
-            if len(keys) > 200:
-                for k in sorted(keys, key=lambda x: state.get(x) or 0)[:50]:
-                    state.pop(k, None)
-            save_state(state)
-            pass  # react ok — без спама в лог
-        except Exception as e:
-            print("channel react fail", mid, str(e)[:80], flush=True)
+    # ключ без «плавающего» chat_id (str/int)
+    key = f"reacted_ch_{mid}"
+    if state.get(key):
+        return
+    emoji = (
+        (cfg.get("channel_react_emoji") or "").strip()
+        or pick_reaction_for_text(text)
+        or "🔥"
+    )
+    try:
+        tg.set_message_reaction(cfg, chat_id, int(mid), emoji)
+        state[key] = int(time.time())
+        # cleanup
+        keys = [k for k in state if str(k).startswith("reacted_ch_")]
+        if len(keys) > 200:
+            for k in sorted(keys, key=lambda x: state.get(x) or 0)[:50]:
+                state.pop(k, None)
+        save_state(state)
+        print(f"channel react ok mid={mid} emoji={emoji}", flush=True)
+    except Exception as e:
+        print("channel react fail", mid, str(e)[:120], flush=True)
+        # не помечаем key — попробуем ещё раз с discussion-форварда
 
 def maybe_seed_under_channel_forward(cfg: dict, state: dict, msg: dict) -> bool:
-    """Когда в обсуждении появился авто-форвард поста — коммент от нейронки."""
-    if not cfg.get("auto_seed_comment", True):
-        return False
+    """Когда в обсуждении появился авто-форвард поста — реакция на пост + seed-коммент."""
     if cfg.get("paused"):
         return False
     if not msg.get("is_automatic_forward") and not msg.get("forward_from_message_id"):
@@ -2437,27 +2463,45 @@ def maybe_seed_under_channel_forward(cfg: dict, state: dict, msg: dict) -> bool:
     ch_mid = msg.get("forward_from_message_id")
     if not ch_mid:
         return False
+
+    post_ctx = (msg.get("text") or msg.get("caption") or "")[:1500]
+    channel = cfg.get("channel_id") or "@Vaggo01"
+
+    # backup: реакция на пост канала (если channel_post не дошёл / эмодзи упал)
+    rkey = f"reacted_ch_{ch_mid}"
+    if cfg.get("auto_react_posts", True) and not state.get(rkey):
+        emoji = (
+            (cfg.get("channel_react_emoji") or "").strip()
+            or pick_reaction_for_text(post_ctx)
+            or "🔥"
+        )
+        try:
+            tg.set_message_reaction(cfg, channel, int(ch_mid), emoji)
+            state[rkey] = int(time.time())
+            save_state(state)
+            print(f"channel react via discuss mid={ch_mid} emoji={emoji}", flush=True)
+        except Exception as e:
+            print("channel react via discuss fail", ch_mid, str(e)[:100], flush=True)
+
+    if not cfg.get("auto_seed_comment", True):
+        return True  # реакцию уже попытались
+
     ckey = f"seeded_ch_{ch_mid}"
     if state.get(ckey):
-        return False
+        return True
     reply_to = msg.get("message_id")
-    # полный текст поста для сида «по теме поста»
-    post_ctx = (msg.get("text") or msg.get("caption") or "")[:1500]
 
     def work():
         try:
             seed = (cfg.get("seed_comment_text") or "").strip()
             if not seed:
-                # первый коммент = по теме ПОСТА, не «универсальная отписка»
                 seed = generate_seed_comment(post_ctx)
             tg.send_message(cfg, disc, seed, reply_to=reply_to, parse_mode=None)
             st = load_state()
             st[ckey] = int(time.time())
-            # корень треда комментариев к посту канала (для comment_on_channel_post)
             roots = st.setdefault("channel_discuss_root", {})
             roots[str(ch_mid)] = int(reply_to)
             save_state(st)
-            pass
         except Exception as e:
             print("seed fail", str(e)[:100], flush=True)
 
