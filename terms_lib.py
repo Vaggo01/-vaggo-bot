@@ -23,9 +23,11 @@ TERMS_VERSION = "2026-07-18-v6"
 GUARANTEE_DAYS = 2  # общая гарантия на проект после сдачи
 REWORK_DAYS = 1  # бесплатные правки/изменения в рамках ТЗ
 
-# Постоянные ссылки для банка / Platega (всегда доступны кнопками)
-PRIVACY_URL = "https://telegra.ph/Politika-konfidencialnosti-06-21-31"
-AGREEMENT_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-04-01-19"
+# Постоянные ссылки для банка / Platega (документы ИМЕННО Вагго, не шаблон провайдера)
+PRIVACY_URL = "https://telegra.ph/Politika-konfidencialnosti-Director-Vaggo-07-25"
+AGREEMENT_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-Director-Vaggo-07-25"
+# алиас: публичная оферта = пользовательское соглашение
+OFFER_URL = AGREEMENT_URL
 
 # Контакты поддержки (не группа — username / бот / почта)
 DEFAULT_SUPPORT = {
@@ -264,7 +266,7 @@ def legal_docs_row() -> list:
     return [
         [
             {"text": "🔒 Политика", "url": PRIVACY_URL},
-            {"text": "📜 Соглашение", "url": AGREEMENT_URL},
+            {"text": "📜 Оферта", "url": AGREEMENT_URL},
         ],
     ]
 
@@ -280,7 +282,7 @@ def gate_keyboard() -> dict:
             ],
             [
                 {"text": "🔒 Политика", "url": PRIVACY_URL},
-                {"text": "📜 Соглашение", "url": AGREEMENT_URL},
+                {"text": "📜 Оферта", "url": AGREEMENT_URL},
             ],
             [{"text": "❌ Не принимаю", "callback_data": "terms:no"}],
         ]
@@ -439,12 +441,14 @@ def prices_html(cfg: dict | None = None) -> str:
 
 def legal_hub_html(cfg: dict | None = None) -> str:
     return (
-        "📋 <b>Документы</b>\n\n"
-        "Раздельно, всегда доступно:\n\n"
-        "🔒 <b>Политика</b> — персональные данные\n"
-        "📜 <b>Соглашение</b> — правила сервиса\n"
-        "💰 <b>Прайс</b> — кто платит и сколько\n"
-        "🆘 <b>Поддержка</b> — тикеты в боте\n\n"
+        "📋 <b>Документы</b> · Director Vaggo\n\n"
+        "Для Platega / банка / клиента — всегда открыты:\n\n"
+        f'🔒 <b>Политика</b> — <a href="{PRIVACY_URL}">telegra.ph</a>\n'
+        f'📜 <b>Соглашение / оферта</b> — <a href="{AGREEMENT_URL}">telegra.ph</a>\n'
+        "💰 <b>Прайс</b> — /prices\n"
+        "🆘 <b>Поддержка</b> — /support\n\n"
+        f"<code>{PRIVACY_URL}</code>\n"
+        f"<code>{AGREEMENT_URL}</code>\n\n"
         f"<i>{TERMS_VERSION}</i>"
     )
 

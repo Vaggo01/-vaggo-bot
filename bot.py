@@ -77,8 +77,8 @@ except ImportError:  # pragma: no cover
     print("WARN: chat_mod_lib missing — chat moderation disabled", flush=True)
 
 _last_queue_tick = 0.0
-# 4.6.0 — cloud-ready: Bothost env, brain fallback, full deploy pack, home/ping UX
-BOT_CODE_VERSION = "4.6.0"
+# 4.6.1 — Vaggo legal docs for Platega (privacy + offer on telegra)
+BOT_CODE_VERSION = "4.6.1"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:
@@ -3322,7 +3322,8 @@ def handle_terms_private(cfg: dict, state: dict, msg: dict) -> bool:
         tg.send_message(
             cfg,
             chat_id,
-            "🔒 <b>Политика конфиденциальности</b>\n\n"
+            "🔒 <b>Политика конфиденциальности</b>\n"
+            "Director Vaggo · для Platega и клиентов\n\n"
             f'<a href="{terms.PRIVACY_URL}">Открыть документ</a>\n'
             f"<code>{terms.PRIVACY_URL}</code>",
             parse_mode="HTML",
@@ -3331,11 +3332,19 @@ def handle_terms_private(cfg: dict, state: dict, msg: dict) -> bool:
         )
         return True
 
-    if cmd in ("/agreement", "/offer", "/соглашение", "/оферта_док"):
+    if cmd in (
+        "/agreement",
+        "/offer",
+        "/соглашение",
+        "/оферта_док",
+        "/public_offer",
+        "/публичная_оферта",
+    ):
         tg.send_message(
             cfg,
             chat_id,
-            "📜 <b>Пользовательское соглашение</b>\n\n"
+            "📜 <b>Пользовательское соглашение / оферта</b>\n"
+            "Director Vaggo · для Platega и клиентов\n\n"
             f'<a href="{terms.AGREEMENT_URL}">Открыть документ</a>\n'
             f"<code>{terms.AGREEMENT_URL}</code>",
             parse_mode="HTML",
