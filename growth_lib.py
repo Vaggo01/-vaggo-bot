@@ -18,6 +18,85 @@ import orders_lib as orders
 REPORT_INTERVAL_SEC = 2.5 * 24 * 3600  # ~2.5 суток
 FINANCE_DIGEST_SEC = 20 * 3600  # ~раз в сутки (с антиспамом)
 
+# --- рефералка ---
+REF_BONUS_RUB = 30  # бонус пригласившему при первом оплаченном заказе реферала
+REF_DISCOUNT_NOTE = "друг пришёл по ссылке"
+
+
+def ref_code_for_user(user_id: int) -> str:
+    return f"ref_{int(user_id)}"
+
+
+def parse_ref_start(arg: str) -> int | None:
+    """Из /start ref_123 → 123."""
+    a = (arg or "").strip()
+    if not a.startswith("ref_"):
+        return None
+    try:
+        return int(a[4:].split("_")[0])
+    except Exception:
+        return None
+
+
+def apply_referral_on_start(state: dict, user_id: int, inviter_id: int | None) -> bool:
+    """Запомнить inviter один раз. True если записали."""
+    if not inviter_id or int(inviter_id) == int(user_id):
+        return False
+    refs = state.setdefault("referrals", {})
+    key = str(int(user_id))
+    if key in refs:
+        return False
+    refs[key] = {
+        "inviter_id": int(inviter_id),
+        "ts": int(time.time()),
+        "rewarded": False,
+    }
+    return True
+
+
+def maybe_reward_referral(cfg: dict, state: dict, buyer_id: int, order_id: str) -> str | None:
+    """
+    После оплаты заказа: бонус пригласившему (один раз на реферала).
+    Возвращает текст для notify owner или None.
+    """
+    refs = state.get("referrals") or {}
+    row = refs.get(str(int(buyer_id)))
+    if not row or row.get("rewarded"):
+        return None
+    inv = int(row.get("inviter_id") or 0)
+    if not inv:
+        return None
+    try:
+        import balance_lib as bal
+
+        bal.credit(
+            inv,
+            REF_BONUS_RUB,
+            kind="referral",
+            note=f"реферал {buyer_id} заказ {order_id}",
+            ref=str(order_id),
+        )
+    except TypeError:
+        try:
+            import balance_lib as bal
+
+            bal.credit(inv, REF_BONUS_RUB, note=f"ref {order_id}")
+        except Exception as e2:
+            print("ref reward fail", e2, flush=True)
+            return None
+    except Exception as e2:
+        print("ref reward fail", e2, flush=True)
+        return None
+    row["rewarded"] = True
+    row["reward_order"] = str(order_id)
+    row["reward_rub"] = REF_BONUS_RUB
+    refs[str(int(buyer_id))] = row
+    state["referrals"] = refs
+    return (
+        f"🎁 Реферал: +{REF_BONUS_RUB} ₽ → user {inv}\n"
+        f"от клиента {buyer_id} · заказ {order_id}"
+    )
+
 
 def find_similar_orders(brief: str, *, kind: str = "", limit: int = 3) -> list[dict]:
     """Грубый поиск похожих сданных/принятых заказов по словам."""
@@ -284,16 +363,13 @@ def build_interim_report(cfg: dict, item: dict) -> str:
         text = (text or "").strip()
         if text:
             return (
-                f"📌 <b>Прогресс по заказу</b> <code>{oid}</code>\n\n"
+                f"Прогресс · заказ <code>{oid}</code>\n\n"
                 f"{text}\n\n"
-                f"Карточка: /myorders · вопрос — кнопка в статусе"
+                f"<i>Ответь на это сообщение — передам.</i>"
             )
     except Exception as e:
         print("interim grok", e, flush=True)
     return (
-        f"📌 <b>Прогресс по заказу</b> <code>{oid}</code>\n\n"
-        f"Работаем по «{kind}».\n"
-        f"Сейчас этап «в работе»: собираем/делаем по согласованному ТЗ.\n"
-        f"Если есть уточнения — напиши сюда или «Вопрос по проекту» в карточке.\n\n"
-        f"Спасибо, что с нами 🔥"
+        f"Прогресс · заказ <code>{oid}</code> ({kind}).\n"
+        f"Работа идёт. Есть вопросы — ответь на это сообщение."
     )

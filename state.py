@@ -76,6 +76,36 @@ def load_config() -> dict:
     if xai:
         cfg["xai_api_key"] = xai
 
+    # host / brain overrides (Bothost)
+    bhm = (os.environ.get("BOT_HOST_MODE") or os.environ.get("HOST_MODE") or "").strip().lower()
+    if bhm:
+        cfg["bot_host_mode"] = bhm
+    elif (os.environ.get("BOT_ID") or "").strip() or (
+        os.environ.get("BOTHOST") or os.environ.get("BOTHHOST") or ""
+    ).strip():
+        # Bothost обычно ставит BOT_ID — включаем cloud-режим автоматически
+        if not str(cfg.get("bot_host_mode") or "").strip():
+            cfg["bot_host_mode"] = "cloud"
+        elif str(cfg.get("bot_host_mode")).lower() == "local" and (
+            os.environ.get("BOT_ID") or ""
+        ).strip():
+            cfg["bot_host_mode"] = "cloud"
+    brain_env = (os.environ.get("BRAIN") or "").strip().lower()
+    if brain_env:
+        cfg["brain"] = brain_env
+    if (os.environ.get("GROK_BRIDGE_DISABLE") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        cfg["grok_bridge_disable"] = True
+    ugs = (os.environ.get("USE_GROK_SESSION") or "").strip().lower()
+    if ugs in ("0", "false", "no", "off"):
+        cfg["use_grok_session"] = False
+    elif ugs in ("1", "true", "yes", "on"):
+        cfg["use_grok_session"] = True
+
     # --- дефолты: владелец / канал (чтобы в облаке не «все юзеры» и не чужой юз) ---
     oids = cfg.get("owner_user_ids") or []
     if not isinstance(oids, list):

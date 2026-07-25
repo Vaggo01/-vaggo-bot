@@ -1,22 +1,24 @@
 """
-Vaggo 3.0 — Channel Manager (Bothost + home Grok bridge).
+Director Vaggo — Channel Manager (Bothost cloud + optional home Grok bridge).
 
-Как в начале, стабильно:
-  владелец: пульт, очередь, черновики, комменты, розыгрыш, заказы
-  клиент: terms → заказ (4 коротких шага) → support
-  Grok: bridge на ПК (SuperGrok session)
-  Deploy: GitHub main → Redeploy / /redeploy
+Владелец: пульт, очередь, черновики, комменты, розыгрыш, заказы
+Клиент: terms → заказ → support
+Grok: XAI_API_KEY на Bothost  ИЛИ  bridge (ПК + tunnel)  ИЛИ  local session
+Deploy: GitHub main → push_bothost.ps1 / /redeploy
 
 Не ломаем: media/giveaways.json + giveaway_restore.json
 """
 from __future__ import annotations
 
 import html
+import json
+import re
 import sys
 import threading
 import time
 import traceback
 from pathlib import Path
+from types import SimpleNamespace
 
 from content import (
     generate_comment_reply,
@@ -57,9 +59,26 @@ from state import (
 )
 import tg
 
+# chat_mod опционален — пакет Bothost не должен падать, если файл забыли
+try:
+    import chat_mod_lib as chatmod
+except ImportError:  # pragma: no cover
+    def _chatmod_noop(*_a, **_k):
+        return None
+
+    chatmod = SimpleNamespace(
+        is_chat_banned=lambda *_a, **_k: False,
+        detect_toxicity=lambda *_a, **_k: None,
+        process_offense=lambda *_a, **_k: {"ok": False},
+        owner_pardon=lambda *_a, **_k: None,
+        status_line=lambda *_a, **_k: "mod off",
+        REASON_RU={},
+    )
+    print("WARN: chat_mod_lib missing — chat moderation disabled", flush=True)
+
 _last_queue_tick = 0.0
-# 4.2.0 — teamlead, finance radar, interim reports, upsell/risks
-BOT_CODE_VERSION = "4.2.0"
+# 4.6.0 — cloud-ready: Bothost env, brain fallback, full deploy pack, home/ping UX
+BOT_CODE_VERSION = "4.6.0"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:
@@ -136,19 +155,13 @@ def comment_keyboard(cid: str) -> dict:
 
 
 def main_menu_keyboard() -> dict:
-    """
-    Пульт владельца 4.1 — широкие главные кнопки + вторичка.
-    callback_data прежние menu:* .
-    """
+    """Главный пульт владельца — чисто, крупно, без каши."""
     return {
         "inline_keyboard": [
-            [{"text": "📊  Сегодня · сводка", "callback_data": "menu:stats"}],
+            [{"text": "📊  Сегодня", "callback_data": "menu:stats"}],
             [
                 {"text": "📅  Очередь", "callback_data": "menu:queue"},
                 {"text": "🚀  Выложить", "callback_data": "menu:qnow"},
-            ],
-            [
-                {"text": "⏸  Пауза канала", "callback_data": "menu:toggle_pause"},
             ],
             [
                 {"text": "🎁  Розыгрыш", "callback_data": "menu:giveaway"},
@@ -159,77 +172,123 @@ def main_menu_keyboard() -> dict:
                 {"text": "📝  Черновики", "callback_data": "menu:drafts"},
             ],
             [
-                {"text": "⚙️  Сервис", "callback_data": "menu:more"},
-                {"text": "🔄  Обновить", "callback_data": "menu:fresh"},
+                {"text": "⏸  Пауза", "callback_data": "menu:toggle_pause"},
+                {"text": "⚙️  Ещё", "callback_data": "menu:more"},
             ],
+            [{"text": "🔄  Обновить пульт", "callback_data": "menu:fresh"}],
         ]
     }
 
 
 def owner_more_keyboard() -> dict:
-    """Сервис — отдельно от ежедневного пульта."""
+    """Сервис — вторичный экран."""
     return {
         "inline_keyboard": [
-            [{"text": "🧠  Состояние Grok", "callback_data": "menu:brains"}],
-            [{"text": "💰  Балансы / касса", "callback_data": "menu:balance"}],
+            [{"text": "🧠  Grok / мозг", "callback_data": "menu:brains"}],
+            [{"text": "💰  Балансы", "callback_data": "menu:balance"}],
             [
-                {"text": "📡  Финрадар", "callback_data": "menu:radar"},
+                {"text": "📡  Радар", "callback_data": "menu:radar"},
                 {"text": "🔥  Горящие", "callback_data": "menu:hot"},
             ],
             [
                 {"text": "♻️  Restore GW", "callback_data": "menu:gwrestore"},
-                {"text": "📌  Кнопки поста", "callback_data": "menu:gfixkb"},
+                {"text": "📌  Кнопки GW", "callback_data": "menu:gfixkb"},
             ],
             [{"text": "🧹  Почистить личку", "callback_data": "menu:clean"}],
-            [{"text": "«  Назад в пульт", "callback_data": "menu:home"}],
+            [{"text": "«  В пульт", "callback_data": "menu:home"}],
         ]
     }
 
 
 def menu_result_keyboard(_group: str | None = None) -> dict:
+    """Низ любого экрана результата — всегда путь домой."""
     return {
         "inline_keyboard": [
             [
                 {"text": "🏠  Пульт", "callback_data": "menu:home"},
+                {"text": "🔄  Обновить", "callback_data": "menu:fresh"},
+            ],
+            [
                 {"text": "🎁  Розыгрыш", "callback_data": "menu:giveaway"},
-            ]
+                {"text": "🛠  Заказы", "callback_data": "menu:orders"},
+            ],
         ]
     }
 
 
+def toast_keyboard() -> dict:
+    """Кнопки под отдельным уведомлением (не перетирает пульт)."""
+    return {
+        "inline_keyboard": [
+            [{"text": "🏠  Открыть пульт", "callback_data": "menu:fresh"}],
+            [
+                {"text": "🛠  Заказы", "callback_data": "menu:orders"},
+                {"text": "🎁  Розыгрыш", "callback_data": "menu:giveaway"},
+            ],
+        ]
+    }
+
+
+def _host_brain_line(cfg: dict | None = None) -> str:
+    """Короткая строка: host + brain source (для пульта / ping)."""
+    try:
+        from content import brain_status
+
+        cfg = cfg or load_config()
+        mode = str(cfg.get("bot_host_mode") or "local").lower()
+        host = "☁️ cloud" if mode in ("cloud", "bothost", "hosting") else "💻 local"
+        bst = brain_status(cfg, use_cache=True, probe_ollama=False)
+        active = str(bst.get("active") or "—")
+        src = str(bst.get("grok_source") or "—")
+        if active == "grok":
+            brain = f"🧠 grok · {html.escape(src)}"
+        elif active == "ollama":
+            brain = "🧠 ollama"
+        else:
+            brain = "🧠 off"
+            hint = bst.get("hint")
+            if hint:
+                brain += f" · {html.escape(str(hint)[:48])}"
+        return f"{host}  ·  {brain}"
+    except Exception:
+        return "host/brain · ?"
+
+
 def owner_home_html() -> str:
     paused = False
+    cfg_home: dict | None = None
     try:
         from state import load_config as _lc
 
-        paused = bool((_lc() or {}).get("paused"))
+        cfg_home = _lc() or {}
+        paused = bool(cfg_home.get("paused"))
     except Exception:
         pass
-    ch_status = "⏸ канал на паузе" if paused else "🟢 канал публикует"
+    ch_status = "⏸  на паузе" if paused else "🟢  в эфире"
+    hb = _host_brain_line(cfg_home)
 
     # розыгрыш
-    gw_block = "🎁  <b>Розыгрыш</b>\n     нет активного"
+    gw_block = "🎁  <b>Розыгрыш</b>  ·  нет активного"
     try:
         act = gw.get_active()
         if act:
             n = gw.entry_count(act, complete_only=True)
             need = gw.min_complete_needed(act) or 10
             mid = act.get("channel_message_id") or "—"
-            prize = html.escape(str(act.get("prize") or "")[:36])
-            # mini bar
+            prize = html.escape(str(act.get("prize") or "")[:40])
             filled = min(10, max(0, int(round(10 * n / max(need, 1)))))
             bar = "▓" * filled + "░" * (10 - filled)
             gw_block = (
-                f"🎁  <b>Розыгрыш</b>  <code>{n}/{need}</code>\n"
+                f"🎁  <b>Розыгрыш</b>  ·  <code>{n}/{need}</code>\n"
                 f"     <code>{bar}</code>\n"
                 f"     {prize}\n"
-                f"     пост · {mid}"
+                f"     пост  ·  {mid}"
             )
     except Exception:
         pass
 
     # очередь
-    q_block = "📅  <b>Очередь</b>\n     пусто"
+    q_block = "📅  <b>Очередь</b>  ·  пусто"
     try:
         from queue_lib import summary as queue_summary
 
@@ -240,8 +299,8 @@ def owner_home_html() -> str:
             when = html.escape(str(nxt.get("publish_at") or "—")[:16])
             title = html.escape(str(nxt.get("title") or nxt.get("id") or "—")[:32])
             q_block = (
-                f"📅  <b>Очередь</b>  <code>{nq}</code> ждут\n"
-                f"     next · {when}\n"
+                f"📅  <b>Очередь</b>  ·  <code>{nq}</code>\n"
+                f"     next  ·  {when}\n"
                 f"     {title}"
             )
     except Exception:
@@ -256,9 +315,9 @@ def owner_home_html() -> str:
     except Exception:
         pass
     c_block = (
-        f"💬  <b>Комменты</b>  ждут ответа · <code>{pend}</code>"
+        f"💬  <b>Комменты</b>  ·  ждут  <code>{pend}</code>"
         if pend
-        else "💬  <b>Комменты</b>  чисто"
+        else "💬  <b>Комменты</b>  ·  чисто"
     )
 
     ord_n = 0
@@ -271,19 +330,20 @@ def owner_home_html() -> str:
         ord_n = len(open_o)
     except Exception:
         pass
-    o_block = f"🛠  <b>Заказы</b>  в работе · <code>{ord_n}</code>"
+    o_block = f"🛠  <b>Заказы</b>  ·  в работе  <code>{ord_n}</code>"
 
     return (
-        f"<b>DIRECTOR VAGGO</b>\n"
-        f"<code>v{BOT_CODE_VERSION}</code>  ·  {ch_status}\n"
-        f"{'━' * 18}\n\n"
+        f"✦  <b>Вагго</b>  ·  пульт\n"
+        f"{ch_status}  ·  <code>{BOT_CODE_VERSION}</code>\n"
+        f"{hb}\n"
+        f"{'─' * 18}\n\n"
         f"{gw_block}\n\n"
         f"{q_block}\n\n"
         f"{c_block}\n"
         f"{o_block}\n\n"
-        f"{'━' * 18}\n"
-        f"📷 Фото/видео в этот чат → черновик\n"
-        f"<i>Главное — кнопки ниже · сервис в «⚙️»</i>"
+        f"{'─' * 18}\n"
+        f"<i>Раздел — кнопки ниже</i>\n"
+        f"<i>Пропал пульт —</i>  /menu  <i>или</i>  «Обновить»"
     )
 
 
@@ -298,32 +358,10 @@ def _owner_panel(
     *,
     force_new: bool = False,
 ) -> int | None:
-    """Одно окно owner_ui_msg. force_new — сброс mid и новое сообщение."""
-    if force_new and uid is not None:
-        try:
-            for sk in (
-                "owner_ui_msg",
-                "owner_notify_msg",
-                "order_ui_msg",
-                "terms_ui_msg",
-                "bal_ui_msg",
-                "sup_ui_msg",
-            ):
-                old = (state.get(sk) or {}).get(str(uid))
-                if old:
-                    ui_try_delete(cfg, chat_id, int(old))
-                state.setdefault(sk, {}).pop(str(uid), None)
-            bag = state.setdefault("priv_bot_msgs", {})
-            for om in list(bag.get(str(uid)) or []):
-                try:
-                    ui_try_delete(cfg, chat_id, int(om))
-                except Exception:
-                    pass
-            bag[str(uid)] = []
-            save_state(state)
-        except Exception as e:
-            print("force_new wipe", e, flush=True)
-        mid = None
+    """
+    Главный пульт: edit живого окна; force_new — свежее сообщение
+    (старое тихо убираем, если можем). Не теряемся.
+    """
     return ui_edit_or_send(
         cfg,
         chat_id,
@@ -333,6 +371,7 @@ def _owner_panel(
         state=state,
         uid=uid,
         store_key="owner_ui_msg",
+        force_new=force_new,
     )
 
 
@@ -503,28 +542,48 @@ def handle_owner_media(cfg: dict, state: dict, msg: dict) -> bool:
 
 
 def notify_owner(cfg: dict, text: str, reply_markup: dict | None = None) -> None:
-    """Одно «липкое» окно уведомлений — без спама в ЛС."""
+    """
+    Важное — ОТДЕЛЬНЫМ сообщением (не затирает пульт).
+    Внизу всегда кнопка «Открыть пульт».
+    """
     oid = owner_chat_id(cfg)
     if not oid:
         return
     try:
-        st = load_state()
-        uid = int(oid)
-        mid = ui_edit_or_send(
+        raw = (text or "").strip()
+        if raw.startswith("🔔"):
+            raw = raw[1:].strip()
+        body = f"🔔  <b>Событие</b>\n{'─' * 14}\n\n{raw[:3000]}"
+        kb = reply_markup or toast_keyboard()
+        # гарантируем путь домой, если разметка своя без меню
+        try:
+            rows = list((kb.get("inline_keyboard") or []))
+            flat = " ".join(
+                (b.get("callback_data") or "") for row in rows for b in row
+            )
+            if "menu:home" not in flat and "menu:fresh" not in flat:
+                rows.append([{"text": "🏠  Пульт", "callback_data": "menu:fresh"}])
+                kb = {"inline_keyboard": rows}
+        except Exception:
+            kb = toast_keyboard()
+        tg.send_message(
             cfg,
             oid,
-            text if (text or "").strip().startswith("🔔") else f"🔔 {text}",
-            reply_markup=reply_markup,
-            state=st,
-            uid=uid,
-            store_key="owner_notify_msg",
+            body[:4000],
+            parse_mode="HTML",
+            reply_markup=kb,
+            disable_preview=True,
         )
-        if mid:
-            _priv_track(cfg, oid, uid, int(mid), keep=3)
     except Exception as e:
         print("notify_owner failed:", e)
         try:
-            tg.send_message(cfg, oid, text, reply_markup=reply_markup)
+            tg.send_message(
+                cfg,
+                oid,
+                (text or "")[:3500],
+                reply_markup=reply_markup or toast_keyboard(),
+                disable_preview=True,
+            )
         except Exception:
             pass
 
@@ -654,8 +713,8 @@ def handle_command(cfg: dict, state: dict, msg: dict) -> None:
     if cmd in ("/start", "/help", "/menu", "/panel", "/пульт"):
         ui_delete_user_message(cfg, msg)
         uid_o = int(user.get("id") or 0) or None
-        # 2.0: всегда новое сообщение — не цепляемся к старому mid
-        mid = _owner_panel(
+        # /menu /start — всегда свежий пульт (не потеряется)
+        _owner_panel(
             cfg,
             state,
             chat_id,
@@ -665,10 +724,77 @@ def handle_command(cfg: dict, state: dict, msg: dict) -> None:
             main_menu_keyboard(),
             force_new=True,
         )
-        if mid and uid_o:
-            state.setdefault("owner_ui_msg", {})[str(uid_o)] = int(mid)
-            _priv_track(cfg, chat_id, uid_o, int(mid), keep=1)
-            save_state(state)
+        return
+
+    # --- модерация чата ---
+    if cmd in ("/modstat", "/modstatus"):
+        target = arg.strip().lstrip("@")
+        if not target:
+            tg.send_message(
+                cfg,
+                chat_id,
+                "🛡 <b>Модерация чата</b>\n"
+                "4 предупр. → мут 1ч · 3 мута → неделя · "
+                "2 недели → 2 мес · ещё неделя → бан\n\n"
+                "<code>/modstat ID</code> · <code>/modpardon ID</code>",
+                parse_mode="HTML",
+            )
+            return
+        try:
+            tid = int(target) if target.isdigit() else 0
+        except Exception:
+            tid = 0
+        if not tid:
+            tg.send_message(cfg, chat_id, "Нужен numeric user_id")
+            return
+        tg.send_message(
+            cfg,
+            chat_id,
+            f"🛡 <code>{tid}</code>\n{html.escape(chatmod.status_line(tid))}",
+            parse_mode="HTML",
+        )
+        return
+
+    if cmd in ("/modpardon", "/modforgive", "/unmute"):
+        target = arg.strip().lstrip("@")
+        if not target.isdigit():
+            tg.send_message(cfg, chat_id, "Пример: <code>/modpardon 123456</code>", parse_mode="HTML")
+            return
+        tid = int(target)
+        u = chatmod.owner_pardon(tid)
+        disc = cfg.get("discussion_group_id")
+        if disc:
+            try:
+                # снять restrict / unban
+                tg.unban_chat_member(cfg, disc, tid, only_if_banned=True)
+                # вернуть права писать (пустые permissions с can_send = true)
+                tg.restrict_chat_member(
+                    cfg,
+                    disc,
+                    tid,
+                    until_date=0,
+                    permissions={
+                        "can_send_messages": True,
+                        "can_send_audios": True,
+                        "can_send_documents": True,
+                        "can_send_photos": True,
+                        "can_send_videos": True,
+                        "can_send_video_notes": True,
+                        "can_send_voice_notes": True,
+                        "can_send_polls": True,
+                        "can_send_other_messages": True,
+                        "can_add_web_page_previews": True,
+                        "can_invite_users": True,
+                    },
+                )
+            except Exception as e:
+                print("modpardon tg", e, flush=True)
+        tg.send_message(
+            cfg,
+            chat_id,
+            f"✅ Снято с <code>{tid}</code>\n{html.escape(chatmod.status_line(tid)) if u else 'ок'}",
+            parse_mode="HTML",
+        )
         return
 
     # ---------- розыгрыш ----------
@@ -1576,6 +1702,7 @@ def handle_owner_menu_callback(
         )
 
     if raw in ("home", "main", "root", ""):
+        # home: edit текущего; если мёртв — сам восстановится
         home(force=False)
         return True
     if raw == "fresh":
@@ -1589,11 +1716,12 @@ def handle_owner_menu_callback(
             chat_id,
             mid,
             uid_m,
-            f"⚙️  <b>Сервис</b>\n"
-            f"{'━' * 16}\n"
-            f"Grok · касса · радар · restore · кнопки · чистка\n\n"
-            f"Или напиши: «какие заказы горят», «финрадар»\n"
-            f"<i>Назад — в основной пульт</i>",
+            f"⚙️  <b>Ещё · сервис</b>\n"
+            f"{'─' * 18}\n\n"
+            f"Grok · касса · радар\n"
+            f"restore · кнопки GW · чистка\n\n"
+            f"<i>Или напиши:</i> «какие заказы горят»\n"
+            f"<i>Назад — в пульт</i>",
             owner_more_keyboard(),
         )
         return True
@@ -1823,18 +1951,18 @@ def handle_owner_menu_callback(
             except Exception as e:
                 body = f"❌ {html.escape(str(e)[:200])}"
         elif raw == "orders":
-            items = orders.list_orders(limit=12)
-            if not items:
-                body = "🛠 Заказов нет."
-            else:
-                lines = ["🛠 <b>Заказы</b>\n"]
-                for it in items[:12]:
-                    lines.append(
-                        f"• <code>{html.escape(str(it.get('id')))}</code> "
-                        f"{html.escape(str(it.get('kind')))} · "
-                        f"{orders.status_label(str(it.get('status') or ''))}"
-                    )
-                body = "\n".join(lines)
+            items = orders.list_orders(limit=15)
+            body = orders.format_owner_orders_list(items)
+            _owner_panel(
+                cfg,
+                state,
+                chat_id,
+                mid,
+                uid_m,
+                body,
+                orders.owner_orders_list_keyboard(items),
+            )
+            return True
         elif raw == "balance":
             try:
                 b = bal.get_balance(int(uid_m or 0))
@@ -1904,6 +2032,36 @@ def handle_callback(cfg: dict, state: dict, cq: dict) -> None:
     mid = msg.get("message_id")
     uid = int(user.get("id") or 0)
 
+    # рефералка (всем)
+    if data == "ref:me" and uid:
+        try:
+            import growth_lib as growth
+
+            code = growth.ref_code_for_user(uid)
+            bot_un = "DirectorVaggobot"
+            try:
+                me = tg.get_me(cfg)
+                if me.get("username"):
+                    bot_un = me["username"]
+            except Exception:
+                pass
+            link = f"https://t.me/{bot_un}?start={code}"
+            tg.answer_callback(cfg, cq["id"], "Ссылка")
+            if chat_id:
+                tg.send_message(
+                    cfg,
+                    chat_id,
+                    f"🔗 <b>Твоя ссылка</b>\n\n"
+                    f"<code>{html.escape(link)}</code>\n\n"
+                    f"Друг заходит → первый оплаченный заказ → "
+                    f"тебе <b>+{growth.REF_BONUS_RUB} ₽</b> на баланс.",
+                    parse_mode="HTML",
+                    disable_preview=True,
+                )
+        except Exception as e:
+            tg.answer_callback(cfg, cq["id"], str(e)[:100], show_alert=True)
+        return
+
     # ПУЛЬТ ВЛАДЕЛЬЦА — первым (чтобы ничего не перехватывало)
     if data.startswith("menu:") and data != "menu:userhome":
         if handle_owner_menu_callback(
@@ -1945,15 +2103,18 @@ def handle_callback(cfg: dict, state: dict, cq: dict) -> None:
     if data == "menu:userhome":
         _safe_answer_cq(cfg, cq["id"], "Меню")
         if chat_id:
+            # если mid мёртв — force_new через edit fail recovery;
+            # клик по «Обновить» предпочитает edit, иначе send
             ui_edit_or_send(
                 cfg,
                 chat_id,
-                terms.user_home_html(),
-                reply_markup=terms.after_accept_keyboard(),
+                terms.user_home_html(uid),
+                reply_markup=terms.after_accept_keyboard(uid),
                 message_id=mid,
                 state=state,
                 uid=uid or None,
                 store_key="terms_ui_msg",
+                force_new=False,
             )
         return
 
@@ -2068,6 +2229,9 @@ def handle_callback(cfg: dict, state: dict, cq: dict) -> None:
                 item.get("reply_text") or "👍",
                 reply_to=item.get("message_id"),
                 parse_mode=None,
+                message_thread_id=item.get("message_thread_id"),
+                allow_without_reply=False,
+                disable_preview=True,
             )
             item["status"] = "replied"
             save_state(state)
@@ -2178,9 +2342,16 @@ _comment_global: list[float] = []
 
 
 def _rate_ok(user_id: int, cfg: dict) -> bool:
+    # владелец — без лимита (тесты/ответы не глушим)
+    try:
+        owners = {int(x) for x in (cfg.get("owner_user_ids") or [])}
+        if int(user_id) in owners:
+            return True
+    except Exception:
+        pass
     now = time.time()
-    per_user = float(cfg.get("comment_rate_user_sec") or 12)
-    per_min = int(cfg.get("comment_rate_global_per_min") or 20)
+    per_user = float(cfg.get("comment_rate_user_sec") or 5)
+    per_min = int(cfg.get("comment_rate_global_per_min") or 30)
     last = _comment_rate.get(user_id) or 0
     if now - last < per_user:
         return False
@@ -2886,6 +3057,20 @@ def _strip_html(s: str) -> str:
     return plain
 
 
+# Все «панели» в личке = ОДНО сообщение
+_MAIN_UI_KEYS = frozenset(
+    {
+        "owner_ui_msg",
+        "owner_notify_msg",
+        "order_ui_msg",
+        "terms_ui_msg",
+        "bal_ui_msg",
+        "sup_ui_msg",
+        "main_ui_msg",
+    }
+)
+
+
 def ui_edit_or_send(
     cfg: dict,
     chat_id: int | str,
@@ -2897,69 +3082,60 @@ def ui_edit_or_send(
     uid: int | None = None,
     store_key: str = "order_ui_msg",
     delete_extra: list[int] | None = None,
+    force_new: bool = False,
 ) -> int | None:
     """
-    Одно UI-окно: ВСЕГДА edit message_id (кнопка).
-    Send — только если mid нет или сообщение умерло (not found).
-    """
-    for x in delete_extra or []:
-        ui_try_delete(cfg, chat_id, x)
+    Умный UI (шедевр без потери окна):
 
-    mid = None
+    • обычный режим — edit живого сообщения (без спама);
+    • force_new / мёртвый mid — новое сообщение + pin;
+    • старое окно тихо удаляем, если можем (чат не зарастает);
+    • никогда не молчим: edit fail → send.
+    """
+    _ = delete_extra
+    _ = store_key  # все ключи пишем в main_ui_msg
+
+    mid_click = None
     try:
         if message_id is not None:
-            mid = int(message_id)
+            mid_click = int(message_id)
     except Exception:
-        mid = None
+        mid_click = None
 
     stored = None
     if state is not None and uid is not None:
         try:
-            s = (state.get(store_key) or {}).get(str(uid))
-            stored = int(s) if s is not None else None
+            s = (state.get("main_ui_msg") or {}).get(str(uid))
+            if s is not None:
+                stored = int(s)
         except Exception:
             stored = None
-        if mid is None:
-            mid = stored
-        elif stored and stored != mid:
-            # не удаляем сразу — edit'им то, что нажал юзер; stored подчистим
-            pass
+
+    candidates: list[int] = []
+    if not force_new:
+        for m in (mid_click, stored):
+            if m and m not in candidates:
+                candidates.append(m)
 
     text_use = (text or "")[:4090]
+    old_mids = [m for m in (mid_click, stored) if m]
 
-    def _store(m: int) -> None:
-        if state is not None and uid is not None:
-            # убрать дубликат старого UI, если был другой mid
-            old = (state.get(store_key) or {}).get(str(uid))
-            try:
-                if old and int(old) != int(m):
-                    ui_try_delete(cfg, chat_id, int(old))
-            except Exception:
-                pass
-            # снести «чужие» окна (order/terms/bal), кроме текущего
-            for sk in (
-                "owner_ui_msg",
-                "owner_notify_msg",
-                "order_ui_msg",
-                "terms_ui_msg",
-                "bal_ui_msg",
-                "sup_ui_msg",
-            ):
-                if sk == store_key:
-                    continue
-                try:
-                    om = (state.get(sk) or {}).get(str(uid))
-                    if om and int(om) != int(m):
-                        ui_try_delete(cfg, chat_id, int(om))
-                        state.setdefault(sk, {}).pop(str(uid), None)
-                except Exception:
-                    pass
-            state.setdefault(store_key, {})[str(uid)] = int(m)
-            try:
-                save_state(state)
-            except Exception:
-                pass
-            _priv_track(cfg, chat_id, int(uid), int(m), keep=2)
+    def _store(m: int, *, do_pin: bool) -> None:
+        if state is None or uid is None:
+            return
+        uid_s = str(uid)
+        state.setdefault("main_ui_msg", {})[uid_s] = int(m)
+        for sk in _MAIN_UI_KEYS:
+            state.setdefault(sk, {})[uid_s] = int(m)
+        if do_pin:
+            prev = (state.get("pinned_ui_msg") or {}).get(uid_s)
+            if not prev or int(prev) != int(m):
+                if tg.pin_chat_message(cfg, chat_id, int(m), silent=True):
+                    state.setdefault("pinned_ui_msg", {})[uid_s] = int(m)
+        try:
+            save_state(state)
+        except Exception:
+            pass
 
     def _try_edit(m: int, body: str, parse_mode: str | None) -> bool:
         try:
@@ -2977,28 +3153,40 @@ def ui_edit_or_send(
             err = str(e).lower()
             if "message is not modified" in err:
                 return True
-            print("ui edit fail", str(e)[:140], flush=True)
+            print("ui edit fail", m, str(e)[:120], flush=True)
             return False
 
-    if mid:
-        # 1) HTML edit
-        if _try_edit(mid, text_use, "HTML"):
-            _store(mid)
-            return mid
-        # 2) plain edit (часто спасает parse entities)
-        if _try_edit(mid, _strip_html(text_use)[:4090], None):
-            _store(mid)
-            return mid
-        # 3) mid мёртвый/удалён — забываем store и шлём новое
-        ui_try_delete(cfg, chat_id, mid)
-        if state is not None and uid is not None:
-            try:
-                state.setdefault(store_key, {}).pop(str(uid), None)
-                save_state(state)
-            except Exception:
-                pass
+    def _try_delete(m: int) -> None:
+        try:
+            tg.api(
+                cfg,
+                "deleteMessage",
+                data={"chat_id": chat_id, "message_id": int(m)},
+            )
+        except Exception:
+            pass
 
-    # send один раз
+    # 1) edit, если не force_new
+    for mid in candidates:
+        if _try_edit(mid, text_use, "HTML"):
+            _store(mid, do_pin=False)
+            return mid
+        if _try_edit(mid, _strip_html(text_use)[:4090], None):
+            _store(mid, do_pin=False)
+            return mid
+
+    # 2) recovery / force_new — новое окно
+    if state is not None and uid is not None:
+        try:
+            uid_s = str(uid)
+            state.setdefault("main_ui_msg", {}).pop(uid_s, None)
+            state.setdefault("pinned_ui_msg", {}).pop(uid_s, None)
+            for sk in _MAIN_UI_KEYS:
+                state.setdefault(sk, {}).pop(uid_s, None)
+            save_state(state)
+        except Exception:
+            pass
+
     try:
         res = tg.send_message(
             cfg,
@@ -3017,13 +3205,21 @@ def ui_edit_or_send(
             reply_markup=reply_markup,
             disable_preview=True,
         )
-    # tg.send_message returns API body {ok, result:{message_id}} or result
     new_mid = None
     if isinstance(res, dict):
         new_mid = res.get("message_id") or (res.get("result") or {}).get("message_id")
     if new_mid:
-        _store(int(new_mid))
-        return int(new_mid)
+        new_mid = int(new_mid)
+        _store(new_mid, do_pin=True)
+        # убрать старые панели, чтобы не терялись в куче
+        for om in old_mids:
+            if om and int(om) != new_mid:
+                _try_delete(int(om))
+        print(
+            f"ui send new mid={new_mid} force_new={force_new} chat={chat_id}",
+            flush=True,
+        )
+        return new_mid
     return None
 
 
@@ -3068,6 +3264,33 @@ def handle_terms_private(cfg: dict, state: dict, msg: dict) -> bool:
     lower = text.lower()
     cmd = lower.split()[0].split("@")[0] if lower.startswith("/") else ""
     chat_id = chat.get("id")
+
+    if cmd in ("/ref", "/реф", "/invite", "/реферал"):
+        try:
+            import growth_lib as growth
+
+            code = growth.ref_code_for_user(uid)
+            bot_un = "DirectorVaggobot"
+            try:
+                me = tg.get_me(cfg)
+                if me.get("username"):
+                    bot_un = me["username"]
+            except Exception:
+                pass
+            link = f"https://t.me/{bot_un}?start={code}"
+            tg.send_message(
+                cfg,
+                chat_id,
+                f"🔗 <b>Реферальная ссылка</b>\n\n"
+                f"<code>{html.escape(link)}</code>\n\n"
+                f"Друг жмёт Start → его первый оплаченный заказ → "
+                f"тебе <b>+{growth.REF_BONUS_RUB} ₽</b>.\n/balance",
+                parse_mode="HTML",
+                disable_preview=True,
+            )
+        except Exception as e:
+            tg.send_message(cfg, chat_id, f"❌ {html.escape(str(e)[:150])}")
+        return True
 
     if cmd in (
         "/terms",
@@ -3185,34 +3408,50 @@ def handle_terms_private(cfg: dict, state: dict, msg: dict) -> bool:
         ui_edit_or_send(
             cfg,
             chat_id,
-            terms.user_home_html(),
-            reply_markup=terms.after_accept_keyboard(),
+            terms.user_home_html(uid),
+            reply_markup=terms.after_accept_keyboard(uid),
             state=state,
             uid=uid,
             store_key="terms_ui_msg",
+            force_new=True,
         )
         return True
 
-    # /start пользователя: ОДНО окно (edit или один send)
+    # /start пользователя: свежее меню, не теряется
     if cmd == "/start" and not is_owner(cfg, user):
         arg = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else ""
+        # рефералка ref_USERID
+        if arg.startswith("ref_"):
+            try:
+                import growth_lib as growth
+
+                inv = growth.parse_ref_start(arg)
+                if growth.apply_referral_on_start(state, uid, inv):
+                    save_state(state)
+            except Exception as e:
+                print("ref start", e, flush=True)
         if not terms.is_accepted(uid):
             send_terms_gate(cfg, chat_id, state=state, uid=uid, full=False)
-            if arg:
+            if arg and not arg.startswith("ref_"):
                 state.setdefault("pending_start_arg", {})[str(uid)] = arg[:80]
                 save_state(state)
             return True
         # deep-link розыгрыша — отдаём giveaway_private
+        if arg and (arg.startswith("gw_") or arg.startswith("gwref_")):
+            return False
+        if arg.startswith("ref_"):
+            arg = ""  # уже учли
         if arg:
             return False
         ui_edit_or_send(
             cfg,
             chat_id,
-            terms.user_home_html(),
-            reply_markup=terms.after_accept_keyboard(),
+            terms.user_home_html(uid),
+            reply_markup=terms.after_accept_keyboard(uid),
             state=state,
             uid=uid,
             store_key="terms_ui_msg",
+            force_new=True,
         )
         return True
     return False
@@ -3722,11 +3961,9 @@ def handle_terms_callback(cfg: dict, state: dict, cq: dict) -> bool:
             ui_edit_or_send(
                 cfg,
                 chat_id,
-                "✅ <b>Условия приняты</b>\n\n"
-                f"Гарантия: <b>{terms.GUARANTEE_DAYS}</b> сут. · "
-                f"правки: <b>{terms.REWORK_DAYS}</b> сут.\n\n"
-                + terms.user_home_html(),
-                reply_markup=terms.after_accept_keyboard(),
+                f"✅ Условия приняты · гарантия {terms.GUARANTEE_DAYS} сут.\n\n"
+                + terms.user_home_html(uid),
+                reply_markup=terms.after_accept_keyboard(uid),
                 message_id=mid,
                 state=state,
                 uid=uid,
@@ -5270,6 +5507,16 @@ def tick_order_reports(cfg: dict) -> None:
             body = growth.build_interim_report(cfg, item)
             tg.send_message(cfg, uid, body, parse_mode="HTML", disable_preview=True)
             growth.mark_report_sent(item)
+            # клиент может ответить
+            try:
+                st = load_state()
+                st.setdefault("client_reply_ctx", {})[str(uid)] = {
+                    "order_id": str(item.get("id") or ""),
+                    "ts": int(time.time()),
+                }
+                save_state(st)
+            except Exception:
+                pass
             print("interim report", item.get("id"), "->", uid, flush=True)
         except Exception as e:
             print("interim send", item.get("id"), e, flush=True)
@@ -5328,6 +5575,47 @@ def handle_owner_system(cfg: dict, state: dict, msg: dict) -> bool:
 
     uid = int(user.get("id") or 0)
 
+    if cmd in ("/ref", "/реф", "/invite"):
+        import growth_lib as growth
+
+        code = growth.ref_code_for_user(uid)
+        bot_un = "DirectorVaggobot"
+        try:
+            me = tg.get_me(cfg)
+            if me.get("username"):
+                bot_un = me["username"]
+        except Exception:
+            pass
+        link = f"https://t.me/{bot_un}?start={code}"
+        tg.send_message(
+            cfg,
+            chat_id,
+            f"🔗 <b>Реферальная ссылка</b>\n\n"
+            f"<code>{html.escape(link)}</code>\n\n"
+            f"Друг жмёт Start → его первый оплаченный заказ "
+            f"даёт тебе <b>+{growth.REF_BONUS_RUB} ₽</b> на баланс.\n"
+            f"/balance",
+            parse_mode="HTML",
+            disable_preview=True,
+        )
+        return True
+
+    if cmd in ("/contract", "/dogovor", "/docs_order") and len(text.split()) >= 2:
+        oid = text.split()[1].strip()
+        item = orders.get_order(oid)
+        if not item:
+            tg.send_message(cfg, chat_id, "Заказ не найден")
+            return True
+        try:
+            import docs_lib
+
+            cpath, apath = docs_lib.write_contract_files(item)
+            tg.send_document(cfg, chat_id, str(cpath), caption=f"Договор {oid}")
+            tg.send_document(cfg, chat_id, str(apath), caption=f"Акт {oid}")
+        except Exception as e:
+            tg.send_message(cfg, chat_id, f"❌ {html.escape(str(e)[:200])}")
+        return True
+
     if cmd in ("/ping", "/alive", "/ver", "/version", "/health", "/diag"):
         import os as _os
 
@@ -5349,13 +5637,23 @@ def handle_owner_system(cfg: dict, state: dict, msg: dict) -> bool:
                 f"всего: {gw.entry_count(act, complete_only=False)}\n"
                 f"id <code>{html.escape(str(act.get('id')))}</code> · пост {mid_ch}"
             )
-        # bridge quick probe
-        br_line = "bridge: ?"
+        host_mode = str(cfg.get("bot_host_mode") or "local")
+        brain_line = "brain: ?"
+        br_line = "bridge: off"
         try:
             from content import _bridge_url, brain_status
 
             bru = _bridge_url(cfg) or ""
             bst = brain_status(cfg, use_cache=False, probe_ollama=False)
+            active = str(bst.get("active") or "—")
+            src = str(bst.get("grok_source") or "—")
+            model = str(bst.get("grok_model") or "—")
+            brain_line = (
+                f"brain: <b>{html.escape(active)}</b> · src <code>{html.escape(src)}</code>\n"
+                f"model: <code>{html.escape(model)}</code>"
+            )
+            if bst.get("hint"):
+                brain_line += f"\n💡 {html.escape(str(bst.get('hint'))[:100])}"
             if bru:
                 try:
                     import requests as _rq
@@ -5366,8 +5664,7 @@ def handle_owner_system(cfg: dict, state: dict, msg: dict) -> bool:
                     ok = hr.ok and "ok" in (hr.text or "").lower()
                     br_line = (
                         f"bridge: {'✅' if ok else '❌ http '+str(hr.status_code)}\n"
-                        f"<code>{html.escape(bru[:56])}</code>\n"
-                        f"brain: <code>{html.escape(str(bst.get('grok_source') or bst.get('active') or '—'))}</code>"
+                        f"<code>{html.escape(bru[:56])}</code>"
                     )
                 except Exception as be:
                     br_line = (
@@ -5376,7 +5673,7 @@ def handle_owner_system(cfg: dict, state: dict, msg: dict) -> bool:
                         "ПК: start_grok_bridge.bat"
                     )
             else:
-                br_line = "bridge: ❌ URL пуст (env GROK_BRIDGE_URL / discovery)"
+                br_line = "bridge: off (API key / session / none)"
         except Exception as e:
             br_line = f"bridge: ❌ {html.escape(str(e)[:100])}"
 
@@ -5388,9 +5685,11 @@ def handle_owner_system(cfg: dict, state: dict, msg: dict) -> bool:
             uid,
             f"pong ✅ · <b>Vaggo {html.escape(BOT_CODE_VERSION)}</b>\n"
             f"ver: <code>{html.escape(BOT_CODE_VERSION)}</code>\n"
+            f"host: <code>{html.escape(host_mode)}</code>\n"
             f"BOT_ID: <code>{html.escape((_os.environ.get('BOT_ID') or 'local')[:40])}</code>\n\n"
-            f"{gw_line}\n\n"
+            f"{brain_line}\n"
             f"{br_line}\n\n"
+            f"{gw_line}\n\n"
             f"🏠 /start · 🎁 /gstatus · ♻️ /gwrestore\n"
             f"🔄 /redeploy · 📌 /gfixkb",
             {
@@ -5403,7 +5702,7 @@ def handle_owner_system(cfg: dict, state: dict, msg: dict) -> bool:
                     [{"text": "📌 Кнопки на пост", "callback_data": "menu:gfixkb"}],
                 ]
             },
-            force_new=True,
+            force_new=False,
         )
         return True
 
@@ -5589,29 +5888,235 @@ def handle_orders_private(cfg: dict, state: dict, msg: dict) -> bool:
     lower = text.lower()
     cmd = lower.split()[0].split("@")[0] if lower.startswith("/") else ""
 
+    # owner: правка ТЗ
+    if owner:
+        aetz = (state.get("await_owner_edit_tz") or {}).get(str(uid))
+        if aetz and text and not text.startswith("/"):
+            oid = str(aetz.get("order_id") or "")
+            state.setdefault("await_owner_edit_tz", {}).pop(str(uid), None)
+            save_state(state)
+            item = orders.get_order(oid)
+            if not item:
+                tg.send_message(cfg, chat_id, "Заказ не найден")
+                return True
+            item["brief"] = text.strip()[:2000]
+            orders.save_order(item)
+            try:
+                orders.append_event(item, "tz_edit", "ТЗ обновлено владельцем")
+            except Exception:
+                pass
+            item = orders.get_order(oid) or item
+            try:
+                _push_client_order_card(
+                    cfg,
+                    item,
+                    delta=f"✏️ ТЗ по заказу <code>{html.escape(oid)}</code> обновлено.",
+                )
+            except Exception:
+                pass
+            tg.send_message(
+                cfg,
+                chat_id,
+                f"✅ ТЗ сохранено · <code>{html.escape(oid)}</code>",
+                parse_mode="HTML",
+                reply_markup=orders.owner_order_hub_keyboard(
+                    oid, user_id=int(item.get("user_id") or 0) or None
+                ),
+            )
+            return True
+        if aetz and cmd in ("/cancel", "/отмена"):
+            state.setdefault("await_owner_edit_tz", {}).pop(str(uid), None)
+            save_state(state)
+            tg.send_message(cfg, chat_id, "Правка ТЗ отменена.")
+            return True
+
+        # owner: сообщение клиенту
+        amsg = (state.get("await_owner_msg_client") or {}).get(str(uid))
+        if amsg and text and not text.startswith("/"):
+            oid = str(amsg.get("order_id") or "")
+            cid = int(amsg.get("client_id") or 0)
+            state.setdefault("await_owner_msg_client", {}).pop(str(uid), None)
+            save_state(state)
+            if not cid:
+                tg.send_message(cfg, chat_id, "Нет client_id")
+                return True
+            try:
+                # force_reply — клиент жмёт «ответить» на сообщение
+                payload = {
+                    "chat_id": cid,
+                    "text": (
+                        f"Сообщение по заказу <code>{html.escape(oid)}</code>\n\n"
+                        f"{html.escape(text[:2800])}\n\n"
+                        f"<i>Ответь на это сообщение — я передам исполнителю.</i>"
+                    ),
+                    "parse_mode": "HTML",
+                    "reply_markup": json.dumps(
+                        {
+                            "force_reply": True,
+                            "input_field_placeholder": "Ваш ответ…",
+                            "selective": False,
+                        }
+                    ),
+                }
+                res = tg.api(cfg, "sendMessage", data=payload)
+                mid_sent = None
+                if isinstance(res, dict):
+                    mid_sent = res.get("message_id") or (res.get("result") or {}).get(
+                        "message_id"
+                    )
+                # контекст: любой следующий ответ клиента (reply или просто текст)
+                state.setdefault("client_reply_ctx", {})[str(cid)] = {
+                    "order_id": oid,
+                    "owner_msg_id": int(mid_sent) if mid_sent else None,
+                    "ts": int(time.time()),
+                }
+                save_state(state)
+                # подтверждение владельцу — edit главного окна
+                ui_edit_or_send(
+                    cfg,
+                    chat_id,
+                    f"✅ Ушло клиенту\nзаказ <code>{html.escape(oid)}</code>\n\n"
+                    f"Он может <b>ответить</b> — придёт сюда.",
+                    reply_markup=orders.owner_order_hub_keyboard(oid, user_id=cid),
+                    state=state,
+                    uid=uid,
+                    store_key="owner_ui_msg",
+                )
+                item = orders.get_order(oid)
+                if item:
+                    orders.append_event(item, "msg", "сообщение клиенту")
+            except Exception as e:
+                tg.send_message(
+                    cfg, chat_id, f"❌ Не смог написать: {html.escape(str(e)[:200])}"
+                )
+            return True
+        if amsg and cmd in ("/cancel", "/отмена"):
+            state.setdefault("await_owner_msg_client", {}).pop(str(uid), None)
+            save_state(state)
+            tg.send_message(cfg, chat_id, "Сообщение отменено.")
+            return True
+
+    # клиент отвечает на сообщение владельца (reply или диалог)
+    if not owner and text and not text.startswith("/"):
+        # не перехватывать опрос ТЗ / confirm
+        _dr = (state.get("order_draft") or {}).get(str(uid)) or {}
+        in_order_flow = bool(_dr.get("kind") and not _dr.get("await_confirm")) or bool(
+            _dr.get("await_confirm")
+        )
+        ctx = (state.get("client_reply_ctx") or {}).get(str(uid))
+        rt = msg.get("reply_to_message") or {}
+        is_reply_to_bot = bool(rt.get("message_id"))
+        use_ctx = False
+        if ctx and not in_order_flow:
+            age = int(time.time()) - int(ctx.get("ts") or 0)
+            if age < 7 * 86400:
+                use_ctx = True
+            else:
+                state.setdefault("client_reply_ctx", {}).pop(str(uid), None)
+                save_state(state)
+                ctx = None
+        # reply всегда можно; free-text — только вне оформления заказа
+        if (use_ctx and not in_order_flow) or is_reply_to_bot:
+            oid = str((ctx or {}).get("order_id") or "")
+            if not oid and is_reply_to_bot:
+                # попробуем вытащить id из текста, на который ответили
+                rtxt = (rt.get("text") or rt.get("caption") or "")
+                m = re.search(r"заказу?\s+([a-f0-9]{8,12})", rtxt, re.I)
+                if not m:
+                    m = re.search(r"\b([a-f0-9]{10})\b", rtxt)
+                if m:
+                    oid = m.group(1)
+            if not oid:
+                # открытый заказ клиента
+                pend = orders.user_pending_order(uid)
+                if pend:
+                    oid = str(pend.get("id") or "")
+            who = f"@{uname}" if uname else name
+            notify_owner(
+                cfg,
+                f"💬 <b>Ответ клиента</b>\n"
+                f"{html.escape(str(who))} · <code>{uid}</code>\n"
+                f"заказ <code>{html.escape(oid or '—')}</code>\n\n"
+                f"{html.escape(text[:1500])}",
+                reply_markup={
+                    "inline_keyboard": (
+                        [
+                            [
+                                {
+                                    "text": "📂 Заказ",
+                                    "callback_data": f"ord:o:open:{oid}",
+                                },
+                                {
+                                    "text": "💬 Ответить",
+                                    "callback_data": f"ord:o:msg:{oid}",
+                                },
+                            ]
+                        ]
+                        if oid
+                        else [[{"text": "🏠 Пульт", "callback_data": "menu:home"}]]
+                    )
+                },
+            )
+            # не сбрасываем ctx — можно переписываться
+            if oid and not ctx:
+                state.setdefault("client_reply_ctx", {})[str(uid)] = {
+                    "order_id": oid,
+                    "ts": int(time.time()),
+                }
+                save_state(state)
+            elif ctx:
+                ctx["ts"] = int(time.time())
+                state.setdefault("client_reply_ctx", {})[str(uid)] = ctx
+                save_state(state)
+            # коротко, без спама если уже в переписке
+            last_ack = int((ctx or {}).get("last_ack") or 0)
+            if int(time.time()) - last_ack > 120:
+                tg.send_message(cfg, chat_id, "✅ Принял.", parse_mode="HTML")
+                if ctx is not None:
+                    ctx["last_ack"] = int(time.time())
+                    state.setdefault("client_reply_ctx", {})[str(uid)] = ctx
+                    save_state(state)
+            return True
+
     # вопрос по проекту (с карточки заказа)
     aq = (state.get("await_order_question") or {}).get(str(uid))
     if aq and text and not text.startswith("/"):
         oid = str(aq.get("order_id") or "")
         state.setdefault("await_order_question", {}).pop(str(uid), None)
+        # оставляем reply-ctx для дальнейшей переписки
+        state.setdefault("client_reply_ctx", {})[str(uid)] = {
+            "order_id": oid,
+            "ts": int(time.time()),
+        }
         save_state(state)
         item = orders.get_order(oid) if oid else None
         tg.send_message(
             cfg,
             chat_id,
-            f"✅ Вопрос по <code>{html.escape(oid)}</code> отправлен.\n"
-            f"Ответим здесь.\n\n"
-            f"/myorders — карточка заказа",
+            f"✅ Отправил. Можешь писать дальше — отвечу здесь.",
             parse_mode="HTML",
         )
         try:
+            who = f"@{uname}" if uname else name
             notify_owner(
                 cfg,
                 f"💬 <b>Вопрос по заказу</b> <code>{html.escape(oid)}</code>\n"
-                f"от {html.escape(name)} "
-                f"(@{html.escape(uname) if uname else '—'})\n"
-                f"статус: {html.escape(str((item or {}).get('status') or '—'))}\n\n"
+                f"{html.escape(str(who))} · <code>{uid}</code>\n\n"
                 f"{html.escape(text[:1200])}",
+                reply_markup={
+                    "inline_keyboard": [
+                        [
+                            {
+                                "text": "📂 Заказ",
+                                "callback_data": f"ord:o:open:{oid}",
+                            },
+                            {
+                                "text": "💬 Ответить",
+                                "callback_data": f"ord:o:msg:{oid}",
+                            },
+                        ]
+                    ]
+                },
             )
         except Exception:
             pass
@@ -5619,7 +6124,7 @@ def handle_orders_private(cfg: dict, state: dict, msg: dict) -> bool:
     if aq and cmd in ("/cancel", "/отмена"):
         state.setdefault("await_order_question", {}).pop(str(uid), None)
         save_state(state)
-        tg.send_message(cfg, chat_id, "Ок, вопрос отменён.")
+        tg.send_message(cfg, chat_id, "Ок, отменено.")
         return True
 
     # любые slash-команды — не трогаем (иначе /redeploy «проглатывается»)
@@ -5642,20 +6147,16 @@ def handle_orders_private(cfg: dict, state: dict, msg: dict) -> bool:
     # --- owner: список / выдача ---
     if owner and cmd in ("/orders", "/заказы"):
         items = orders.list_orders(limit=15)
-        if not items:
-            tg.send_message(cfg, chat_id, "Заказов пока нет.")
-            return True
-        lines = ["🛠 <b>Заказы</b>\n"]
-        for it in items:
-            price = f"{it.get('price')}₽"
-            un = it.get("username")
-            who = f"@{un}" if un else it.get("name")
-            lines.append(
-                f"• <code>{it.get('id')}</code> · {it.get('status')} · {price}\n"
-                f"  {html.escape(str(who))} · {html.escape(str(it.get('kind')))}"
-            )
-        lines.append("\nВыдача: пришли файл с подписью\n<code>/odeliver ID</code>")
-        tg.send_message(cfg, chat_id, "\n".join(lines), parse_mode="HTML")
+        ui_edit_or_send(
+            cfg,
+            chat_id,
+            orders.format_owner_orders_list(items),
+            reply_markup=orders.owner_orders_list_keyboard(items),
+            state=state,
+            uid=uid,
+            store_key="owner_ui_msg",
+        )
+        save_state(state)
         return True
 
     if owner and cmd == "/odeliver":
@@ -6049,16 +6550,51 @@ def _owner_set_order_status(cfg: dict, state: dict, cq: dict, oid: str, status: 
         _push_client_order_card(cfg, item, delta=client_msgs.get(status))
     except Exception as e:
         print("push client card", e, flush=True)
+    # при сдаче — акт + черновик кейса владельцу
+    if status == "done":
+        try:
+            import docs_lib
+
+            _c, apath = docs_lib.write_contract_files(item)
+            uid_c = int(item.get("user_id") or 0)
+            if uid_c:
+                tg.send_document(
+                    cfg,
+                    uid_c,
+                    str(apath),
+                    caption=f"📋 <b>Акт выполненных работ</b>\nзаказ <code>{html.escape(oid)}</code>",
+                )
+        except Exception as e:
+            print("act send", e, flush=True)
+        try:
+            import docs_lib
+
+            case = docs_lib.build_case_draft(item)
+            notify_owner(
+                cfg,
+                case
+                + "\n\n<i>Опубликовать? Отредактируй и кинь /draft или в канал вручную.</i>",
+            )
+        except Exception as e:
+            print("case draft", e, flush=True)
+    # владельцу — edit карточки, без лишнего «OK» в чат
     if chat_id and status != "done":
         try:
-            tg.send_message(
+            item2 = orders.get_order(oid) or item
+            ui_edit_or_send(
                 cfg,
                 chat_id,
-                f"OK · <code>{html.escape(oid)}</code> → {status}",
-                parse_mode="HTML",
+                orders.format_order_card(item2, for_owner=True),
+                reply_markup=orders.owner_order_hub_keyboard(
+                    oid, user_id=int(item2.get("user_id") or 0) or None
+                ),
+                state=state,
+                uid=int((cq.get("from") or {}).get("id") or 0) or None,
+                store_key="owner_ui_msg",
             )
-        except Exception:
-            pass
+            save_state(state)
+        except Exception as e:
+            print("owner hub refresh", e, flush=True)
     return True
 
 
@@ -6077,6 +6613,209 @@ def handle_orders_callback(cfg: dict, state: dict, cq: dict) -> bool:
 
     if action == "noop":
         tg.answer_callback(cfg, cq["id"], "Выбери услугу ниже")
+        return True
+
+    # owner CRM: ord:o:open|tz|editz|msg|docs|docc|doca|case|docall|list|clients|prof
+    if action == "o" and len(parts) >= 3 and is_owner(cfg, user):
+        sub = parts[2]
+        cb_mid = msg.get("message_id")
+
+        def _panel(body: str, kb: dict) -> None:
+            if not chat_id:
+                return
+            ui_edit_or_send(
+                cfg,
+                chat_id,
+                body,
+                reply_markup=kb,
+                message_id=cb_mid,
+                state=state,
+                uid=uid,
+                store_key="owner_ui_msg",
+            )
+            save_state(state)
+
+        if sub == "list":
+            items = orders.list_orders(limit=15)
+            tg.answer_callback(cfg, cq["id"], "Заказы")
+            _panel(
+                orders.format_owner_orders_list(items),
+                orders.owner_orders_list_keyboard(items),
+            )
+            return True
+
+        if sub == "clients":
+            clients = orders.list_clients(limit=20)
+            tg.answer_callback(cfg, cq["id"], "Клиенты")
+            body = (
+                f"👥 <b>Клиенты</b> · {len(clients)}\n"
+                f"{'━' * 16}\n"
+                f"Профиль: заказы · баланс · написать"
+            )
+            _panel(body, orders.owner_clients_keyboard(clients))
+            return True
+
+        if sub == "prof" and len(parts) >= 4:
+            try:
+                cuid = int(parts[3])
+            except ValueError:
+                tg.answer_callback(cfg, cq["id"], "bad id", show_alert=True)
+                return True
+            tg.answer_callback(cfg, cq["id"], "Профиль")
+            items = orders.list_user_orders(cuid, limit=20)
+            _panel(
+                orders.format_client_profile(cuid),
+                orders.client_profile_keyboard(cuid, items),
+            )
+            return True
+
+        if sub in (
+            "open",
+            "tz",
+            "editz",
+            "msg",
+            "docs",
+            "docc",
+            "doca",
+            "case",
+            "docall",
+        ) and len(parts) >= 4:
+            oid = parts[3]
+            item = orders.get_order(oid)
+            if not item:
+                tg.answer_callback(cfg, cq["id"], "Не найден", show_alert=True)
+                return True
+            cuid = int(item.get("user_id") or 0)
+
+            if sub == "open":
+                # сброс ожидания правки/сообщения
+                state.setdefault("await_owner_edit_tz", {}).pop(str(uid), None)
+                state.setdefault("await_owner_msg_client", {}).pop(str(uid), None)
+                save_state(state)
+                tg.answer_callback(cfg, cq["id"], "Заказ")
+                _panel(
+                    orders.format_order_card(item, for_owner=True),
+                    orders.owner_order_hub_keyboard(oid, user_id=cuid or None),
+                )
+                return True
+
+            if sub == "tz":
+                tg.answer_callback(cfg, cq["id"], "ТЗ")
+                _panel(
+                    orders.format_tz_full(item),
+                    {
+                        "inline_keyboard": [
+                            [
+                                {
+                                    "text": "✏️ Править ТЗ",
+                                    "callback_data": f"ord:o:editz:{oid}",
+                                }
+                            ],
+                            [
+                                {
+                                    "text": "« К заказу",
+                                    "callback_data": f"ord:o:open:{oid}",
+                                }
+                            ],
+                        ]
+                    },
+                )
+                return True
+
+            if sub == "editz":
+                state.setdefault("await_owner_edit_tz", {})[str(uid)] = {
+                    "order_id": oid,
+                    "ts": int(time.time()),
+                }
+                save_state(state)
+                tg.answer_callback(cfg, cq["id"], "Жду новое ТЗ")
+                _panel(
+                    f"✏️ <b>Правка ТЗ</b> <code>{html.escape(oid)}</code>\n\n"
+                    f"Пришли <b>полным сообщением</b> новый текст ТЗ.\n"
+                    f"/cancel — отмена\n\n"
+                    f"<i>Сейчас:</i>\n"
+                    f"{html.escape((item.get('brief') or '')[:900])}",
+                    {
+                        "inline_keyboard": [
+                            [
+                                {
+                                    "text": "« Отмена",
+                                    "callback_data": f"ord:o:open:{oid}",
+                                }
+                            ]
+                        ]
+                    },
+                )
+                return True
+
+            if sub == "msg":
+                state.setdefault("await_owner_msg_client", {})[str(uid)] = {
+                    "order_id": oid,
+                    "client_id": cuid,
+                    "ts": int(time.time()),
+                }
+                save_state(state)
+                tg.answer_callback(cfg, cq["id"], "Жду текст")
+                who = item.get("username") or item.get("name") or cuid
+                _panel(
+                    f"💬 <b>Сообщение клиенту</b>\n"
+                    f"заказ <code>{html.escape(oid)}</code> · {html.escape(str(who))}\n\n"
+                    f"Напиши текст — уйдёт клиенту в личку.\n"
+                    f"/cancel — отмена",
+                    {
+                        "inline_keyboard": [
+                            [
+                                {
+                                    "text": "« Отмена",
+                                    "callback_data": f"ord:o:open:{oid}",
+                                }
+                            ]
+                        ]
+                    },
+                )
+                return True
+
+            if sub == "docs":
+                tg.answer_callback(cfg, cq["id"], "Документы")
+                _panel(
+                    f"📄 <b>Документы</b> · <code>{html.escape(oid)}</code>\n\n"
+                    f"Выбери стопку: договор · акт · кейс · всё сразу",
+                    orders.owner_docs_keyboard(oid),
+                )
+                return True
+
+            if sub in ("docc", "doca", "case", "docall"):
+                tg.answer_callback(cfg, cq["id"], "Отправляю…")
+                try:
+                    import docs_lib
+
+                    cpath, apath = docs_lib.write_contract_files(item)
+                    if sub in ("docc", "docall") and chat_id:
+                        tg.send_document(
+                            cfg,
+                            chat_id,
+                            str(cpath),
+                            caption=f"📄 Договор · {oid}",
+                        )
+                    if sub in ("doca", "docall") and chat_id:
+                        tg.send_document(
+                            cfg, chat_id, str(apath), caption=f"📋 Акт · {oid}"
+                        )
+                    if sub in ("case", "docall") and chat_id:
+                        tg.send_message(
+                            cfg,
+                            chat_id,
+                            docs_lib.build_case_draft(item),
+                            parse_mode="HTML",
+                        )
+                except Exception as e:
+                    if chat_id:
+                        tg.send_message(
+                            cfg, chat_id, f"❌ {html.escape(str(e)[:200])}"
+                        )
+                return True
+
+        tg.answer_callback(cfg, cq["id"], "ok")
         return True
 
     # owner short: ord:w:ID / ord:d:ID / ord:x:ID
@@ -6181,6 +6920,44 @@ def handle_orders_callback(cfg: dict, state: dict, cq: dict) -> bool:
                 store_key="order_ui_msg",
             )
             save_state(state)
+        return True
+
+    if action == "docs" and len(parts) >= 3:
+        oid = parts[2]
+        item = orders.get_order(oid)
+        if not item or (
+            int(item.get("user_id") or 0) != uid and not is_owner(cfg, user)
+        ):
+            tg.answer_callback(cfg, cq["id"], "Заказ не найден", show_alert=True)
+            return True
+        tg.answer_callback(cfg, cq["id"], "Готовлю документы…")
+        try:
+            import docs_lib
+
+            cpath, apath = docs_lib.write_contract_files(item)
+            if chat_id:
+                tg.send_document(
+                    cfg,
+                    chat_id,
+                    str(cpath),
+                    caption=f"📄 Договор-оферта · заказ <code>{html.escape(oid)}</code>",
+                )
+                tg.send_document(
+                    cfg,
+                    chat_id,
+                    str(apath),
+                    caption=f"📋 Акт · заказ <code>{html.escape(oid)}</code>\n"
+                    f"<i>Акт актуален после сдачи; можно скачать заранее.</i>",
+                )
+            try:
+                orders.append_event(item, "docs", "выданы договор и акт")
+            except Exception:
+                pass
+        except Exception as e:
+            if chat_id:
+                tg.send_message(
+                    cfg, chat_id, f"❌ Документы: {html.escape(str(e)[:200])}"
+                )
         return True
 
     if action == "cancel":
@@ -6428,6 +7205,27 @@ def handle_orders_callback(cfg: dict, state: dict, cq: dict) -> bool:
         check = orders.get_order(item["id"])
         if not check:
             print("WARN order not on disk after create", item["id"], flush=True)
+        try:
+            orders.append_event(item, "new", "заказ создан")
+            if item.get("paid_from_balance"):
+                orders.append_event(
+                    item, "paid", f"оплата {item.get('paid_from_balance')} ₽"
+                )
+            item = orders.get_order(item["id"]) or item
+        except Exception:
+            pass
+        # реферальный бонус пригласившему
+        try:
+            import growth_lib as growth
+
+            ref_msg = growth.maybe_reward_referral(
+                cfg, state, uid, str(item.get("id"))
+            )
+            if ref_msg:
+                save_state(state)
+                notify_owner(cfg, ref_msg)
+        except Exception as e:
+            print("ref reward", e, flush=True)
         tg.answer_callback(cfg, cq["id"], "Заказ создан")
         pay_note = ""
         if item.get("paid_from_balance"):
@@ -6436,20 +7234,45 @@ def handle_orders_callback(cfg: dict, state: dict, cq: dict) -> bool:
                 f" · остаток {item.get('balance_after')} ₽"
             )
         if chat_id:
-            ui_edit_or_send(
+            mid_card = ui_edit_or_send(
                 cfg,
                 chat_id,
                 "✅ <b>Заказ принят</b>\n\n"
                 + orders.format_order_card(item)
                 + pay_note
-                + f"\n\n{orders.status_label('new')}\n"
-                "Следи статусом ниже или /myorders.",
+                + "\n\n📄 Договор — кнопкой на карточке.",
                 reply_markup=orders.user_order_actions_keyboard(item["id"]),
                 message_id=cb_mid,
                 state=state,
                 uid=uid,
                 store_key="order_ui_msg",
             )
+            try:
+                if mid_card:
+                    orders.set_client_card(
+                        item, chat_id=int(chat_id), message_id=int(mid_card)
+                    )
+            except Exception:
+                pass
+            # авто-выдача договора
+            try:
+                import docs_lib
+
+                cpath, apath = docs_lib.write_contract_files(item)
+                tg.send_document(
+                    cfg,
+                    chat_id,
+                    str(cpath),
+                    caption=f"📄 Договор · <code>{html.escape(str(item['id']))}</code>",
+                )
+                tg.send_document(
+                    cfg,
+                    chat_id,
+                    str(apath),
+                    caption=f"📋 Акт (шаблон) · <code>{html.escape(str(item['id']))}</code>",
+                )
+            except Exception as e:
+                print("auto docs", e, flush=True)
             save_state(state)
         notify_owner(
             cfg,
@@ -7241,8 +8064,164 @@ def maybe_handle_giveaway_entry(cfg: dict, state: dict, msg: dict) -> bool:
     return False
 
 
+def maybe_moderate_discussion(cfg: dict, msg: dict) -> bool:
+    """
+    Модератор чата: ИИ → удалить + варн/мут/бан.
+    True = обработано (обычный AI-ответ не шлём).
+    """
+    if cfg.get("chat_mod_enabled") is False:
+        return False
+    chat = msg.get("chat") or {}
+    chat_id = chat.get("id")
+    disc = cfg.get("discussion_group_id") or 0
+    if not disc or int(chat_id or 0) != int(disc):
+        return False
+    if msg.get("is_automatic_forward"):
+        return False
+    user = msg.get("from") or {}
+    if not user or user.get("is_bot"):
+        return False
+    uid = int(user.get("id") or 0)
+    if not uid:
+        return False
+
+    # owner: по умолчанию ТОЖЕ модерируем (иначе тесты «с себя» не работают).
+    # Иммунитет: chat_mod_skip_owner=true
+    owner_here = is_owner(cfg, user)
+    if owner_here and cfg.get("chat_mod_skip_owner", False):
+        print("chatmod skip owner (config)", uid, flush=True)
+        return False
+
+    mid = msg.get("message_id")
+    text = (msg.get("text") or msg.get("caption") or "").strip()
+    if not text:
+        return False
+
+    # пермач — снести и всё
+    if chatmod.is_chat_banned(uid):
+        ok_del = tg.try_delete_message(cfg, chat_id, mid) if mid else False
+        print(f"chatmod banned-user del={ok_del} mid={mid}", flush=True)
+        return True
+
+    # ИИ-вердикт
+    try:
+        reason = chatmod.detect_toxicity(text, cfg=cfg)
+    except Exception as e:
+        print("chatmod detect err", e, flush=True)
+        reason = None
+    print(
+        f"chatmod check uid={uid} mid={mid} verdict={reason!r} text={text[:60]!r}",
+        flush=True,
+    )
+    if not reason:
+        return False
+
+    uname = (user.get("username") or "").lstrip("@")
+    name = (
+        f"{user.get('first_name') or ''} {user.get('last_name') or ''}".strip()
+        or uname
+        or str(uid)
+    )
+
+    # 1) удалить СРАЗУ
+    ok_del = False
+    if mid:
+        ok_del = tg.try_delete_message(cfg, chat_id, mid)
+        if not ok_del:
+            # повтор через raw api
+            try:
+                tg.delete_message(cfg, chat_id, int(mid))
+                ok_del = True
+            except Exception as e:
+                print("chatmod DELETE FAIL", mid, e, flush=True)
+
+    # 2) лестница (owner не мутим/баним жёстко — только delete+warn в лог)
+    if owner_here:
+        res = {
+            "action": "warn",
+            "warnings": "—",
+            "mutes": "—",
+            "week_bans": "—",
+            "public_text": f"⚠️ Сообщение снято (токсик). Owner — без мута.",
+            "private_text": "Тест модерации: сообщение удалено. Лестница на owner не капает.",
+            "reason_h": chatmod.REASON_RU.get(reason, reason),
+        }
+        action = "warn"
+        until = 0
+    else:
+        res = chatmod.process_offense(
+            uid,
+            reason=reason,
+            username=uname,
+            name=name,
+            snippet=text[:200],
+        )
+        action = res.get("action") or "warn"
+        until = int(res.get("until") or 0)
+        try:
+            if action == "mute" and until:
+                tg.restrict_chat_member(cfg, chat_id, uid, until_date=until)
+            elif action in ("week", "month") and until:
+                tg.restrict_chat_member(cfg, chat_id, uid, until_date=until)
+            elif action == "ban":
+                tg.ban_chat_member(cfg, chat_id, uid, revoke_messages=False)
+        except Exception as e:
+            print("chatmod restrict fail", action, e, flush=True)
+
+    # 3) публично
+    thr = msg.get("message_thread_id")
+    try:
+        tg.send_message(
+            cfg,
+            chat_id,
+            res.get("public_text") or "⚠️",
+            parse_mode=None,
+            message_thread_id=int(thr) if thr else None,
+            disable_preview=True,
+        )
+    except Exception as e:
+        print("chatmod public fail", e, flush=True)
+
+    # 4) ЛС
+    try:
+        tg.send_message(
+            cfg,
+            uid,
+            res.get("private_text") or "⚠️ Нарушение в чате Vaggo.",
+            parse_mode=None,
+            disable_preview=True,
+        )
+    except Exception:
+        pass
+
+    # 5) owner notify (если не сам owner)
+    if not owner_here:
+        try:
+            notify_owner(
+                cfg,
+                f"🛡 <b>Модерация</b> · {html.escape(str(action))}\n"
+                f"del={'ok' if ok_del else 'FAIL'}\n"
+                f"От: {html.escape(name)}"
+                + (f" (@{html.escape(uname)})" if uname else "")
+                + f"\n<code>{uid}</code>\n"
+                f"Причина: {html.escape(str(res.get('reason_h') or reason))}\n"
+                f"Статус: ⚠{res.get('warnings')}/4 · мут {res.get('mutes')}/3 · "
+                f"нед {res.get('week_bans')}/2\n"
+                f"<i>{html.escape(text[:200])}</i>\n"
+                f"/modstat {uid} · /modpardon {uid}",
+            )
+        except Exception:
+            pass
+
+    print(
+        f"chatmod DONE action={action} del={ok_del} uid={uid} reason={reason}",
+        flush=True,
+    )
+    return True
+
+
 def maybe_handle_discussion(cfg: dict, state: dict, msg: dict) -> None:
-    """Комменты: сразу отвечает по теме (Grok), в фоне — polling не блокируется."""
+    """Комменты: модерация → розыгрыш → Grok. В фоне — polling не блокируется."""
     chat = msg.get("chat") or {}
     chat_id = chat.get("id")
     disc = cfg.get("discussion_group_id") or 0
@@ -7257,6 +8236,12 @@ def maybe_handle_discussion(cfg: dict, state: dict, msg: dict) -> None:
     user = msg.get("from") or {}
     if user.get("is_bot"):
         return
+    # модератор первым
+    try:
+        if maybe_moderate_discussion(cfg, msg):
+            return
+    except Exception as e:
+        print("chatmod error", e, flush=True)
     text = (msg.get("text") or msg.get("caption") or "").strip()
     if not text or text.startswith("/"):
         return
@@ -7287,12 +8272,13 @@ def maybe_handle_discussion(cfg: dict, state: dict, msg: dict) -> None:
     uname = user.get("username") or user.get("first_name") or "?"
     print(f"comment in: from={uname} mid={mid} text={text[:80]!r}", flush=True)
 
-    # реакция сразу (лёгкая)
+    # реакция сразу (лёгкая) — не валим ответ, если реакция недоступна
     if cfg.get("auto_react_comments", True) and mid:
         try:
             tg.set_message_reaction(cfg, chat_id, int(mid), pick_reaction_for_text(text))
         except Exception as e:
-            print("comment react fail", e, flush=True)
+            # часто: нет прав / privacy / message not found — коммент всё равно отвечаем
+            print("comment react fail", str(e)[:120], flush=True)
 
     # instant по умолчанию (если не выключено явно)
     can_reply = bool(cfg.get("auto_reply_comments", True))
@@ -7316,7 +8302,7 @@ def maybe_handle_discussion(cfg: dict, state: dict, msg: dict) -> None:
                 )
             except Exception:
                 pass
-            # пост как ФОН
+            # пост / тред как ФОН: reply chain + top of thread
             post_ctx = ""
             rt = msg.get("reply_to_message") or {}
             if rt:
@@ -7324,27 +8310,52 @@ def maybe_handle_discussion(cfg: dict, state: dict, msg: dict) -> None:
                 if not post_ctx and rt.get("reply_to_message"):
                     rr = rt["reply_to_message"]
                     post_ctx = (rr.get("text") or rr.get("caption") or "")[:700]
+                # авто-форвард поста канала
+                if not post_ctx and (
+                    rt.get("is_automatic_forward") or rt.get("forward_from_message_id")
+                ):
+                    post_ctx = (rt.get("text") or rt.get("caption") or "")[:700]
 
-            # мгновенный плейсхолдер (читатель видит ответ сразу), потом edit
+            def _send_comment_reply(body: str) -> dict:
+                """Reply на коммент (под постом). Если target пропал — всё равно отправим, не молчим."""
+                kwargs = dict(
+                    parse_mode=None,
+                    message_thread_id=thr,
+                    disable_preview=True,
+                )
+                if mid:
+                    try:
+                        return tg.send_message(
+                            cfg,
+                            chat_id,
+                            body,
+                            reply_to=int(mid),
+                            allow_without_reply=False,
+                            **kwargs,
+                        )
+                    except Exception as e1:
+                        print("comment strict reply fail, retry soft", e1, flush=True)
+                        return tg.send_message(
+                            cfg,
+                            chat_id,
+                            body,
+                            reply_to=int(mid),
+                            allow_without_reply=True,
+                            **kwargs,
+                        )
+                return tg.send_message(cfg, chat_id, body, **kwargs)
+
+            # stub «…» ВЫКЛ по умолчанию (точки бесили + ломали reply)
             stub_mid = None
-            use_stub = bool(cfg.get("comment_stub_then_edit", True)) and instant
+            use_stub = bool(cfg.get("comment_stub_then_edit", False)) and instant
             if use_stub:
                 try:
                     from content import try_instant_comment
 
                     stub = try_instant_comment(text, username=str(uname))
-                    if not stub:
-                        stub = "…"
-                    # если instant уже полный ответ — не ждём Grok
-                    if stub != "…":
-                        r0 = tg.send_message(
-                            cfg,
-                            chat_id,
-                            stub,
-                            reply_to=mid,
-                            parse_mode=None,
-                            message_thread_id=thr,
-                        )
+                    if stub:
+                        # полный instant — один reply, без Grok
+                        _send_comment_reply(stub)
                         print(f"comment instant out mid={mid}", flush=True)
                         st = load_state()
                         _log_comment_event(
@@ -7360,15 +8371,9 @@ def maybe_handle_discussion(cfg: dict, state: dict, msg: dict) -> None:
                             },
                         )
                         return
-                    r0 = tg.send_message(
-                        cfg,
-                        chat_id,
-                        stub,
-                        reply_to=mid,
-                        parse_mode=None,
-                        message_thread_id=thr,
-                    )
-                    stub_mid = (r0.get("result") or {}).get("message_id")
+                    # плейсхолдер только если явно включён stub
+                    r0 = _send_comment_reply("⏳")
+                    stub_mid = (r0 or {}).get("message_id")
                 except Exception as e:
                     print("comment stub fail", e, flush=True)
                     stub_mid = None
@@ -7382,6 +8387,7 @@ def maybe_handle_discussion(cfg: dict, state: dict, msg: dict) -> None:
                 reply = "Йо, я тут 🔥"
             st = load_state()
             if instant:
+                sent_ok = False
                 if stub_mid:
                     try:
                         tg.edit_message_text(
@@ -7395,26 +8401,32 @@ def maybe_handle_discussion(cfg: dict, state: dict, msg: dict) -> None:
                             f"comment edit mid={stub_mid} reply={reply[:80]!r}",
                             flush=True,
                         )
+                        sent_ok = True
                     except Exception as e:
                         print("comment edit fail, send new", e, flush=True)
-                        tg.send_message(
-                            cfg,
-                            chat_id,
-                            reply,
-                            reply_to=mid,
-                            parse_mode=None,
-                            message_thread_id=thr,
-                        )
-                else:
-                    tg.send_message(
-                        cfg,
-                        chat_id,
-                        reply,
-                        reply_to=mid,
-                        parse_mode=None,
-                        message_thread_id=thr,
-                    )
-                    print(f"comment out: mid={mid} reply={reply[:80]!r}", flush=True)
+                if not sent_ok:
+                    try:
+                        _send_comment_reply(reply)
+                        print(f"comment out: mid={mid} reply={reply[:80]!r}", flush=True)
+                        sent_ok = True
+                    except Exception as e:
+                        # fallback: без thread, но ВСЕГДА reply_to
+                        print("comment reply strict fail", e, flush=True)
+                        try:
+                            tg.send_message(
+                                cfg,
+                                chat_id,
+                                reply,
+                                reply_to=int(mid) if mid else None,
+                                parse_mode=None,
+                                allow_without_reply=False,
+                                disable_preview=True,
+                            )
+                            print(f"comment out fallback reply_to mid={mid}", flush=True)
+                            sent_ok = True
+                        except Exception as e2:
+                            print("comment out hard fail", e2, flush=True)
+                            raise
                 _log_comment_event(
                     st,
                     {
@@ -7424,9 +8436,10 @@ def maybe_handle_discussion(cfg: dict, state: dict, msg: dict) -> None:
                         "comment_text": text[:400],
                         "reply_text": reply[:400],
                         "message_id": mid,
+                        "thread_id": thr,
                     },
                 )
-                if cfg.get("notify_owner_on_comment", True):
+                if cfg.get("notify_owner_on_comment", False):
                     notify_owner(
                         cfg,
                         f"💬 <b>Ответил в комменты</b>\n"
@@ -7670,7 +8683,7 @@ def run() -> None:
                     else "\nbridge: off (local session)"
                 ),
                 main_menu_keyboard(),
-                force_new=True,
+                force_new=False,
             )
             save_state(st_ui)
         except Exception as e:
@@ -7706,20 +8719,20 @@ def run() -> None:
         {"command": "balance", "description": "💳 Баланс"},
         {"command": "prices", "description": "💰 Прайс"},
         {"command": "support", "description": "🆘 Поддержка"},
+        {"command": "ref", "description": "🔗 Реферальная ссылка"},
     ]
     owner_cmds = [
-        {"command": "start", "description": "🏠 Пульт 4.0"},
+        {"command": "start", "description": "🏠 Пульт"},
         {"command": "ping", "description": "Версия / Grok / GW"},
         {"command": "queue", "description": "Очередь постов"},
         {"command": "gstatus", "description": "Розыгрыш"},
-        {"command": "gwrestore", "description": "Restore участников"},
-        {"command": "gfixkb", "description": "Кнопки на пост GW"},
         {"command": "orders", "description": "Заказы"},
         {"command": "radar", "description": "Финрадар"},
         {"command": "hot", "description": "Горящие заказы"},
-        {"command": "tl", "description": "Тимлид: вопрос текстом"},
+        {"command": "tl", "description": "Тимлид"},
+        {"command": "contract", "description": "Договор: /contract id"},
+        {"command": "ref", "description": "Рефералка"},
         {"command": "clean", "description": "Почистить ЛС"},
-        {"command": "redeploy", "description": "GitHub update"},
         {"command": "brains", "description": "Grok статус"},
     ]
     try:

@@ -1,5 +1,6 @@
 {
-  "url": "",
-  "note": "LOCAL ONLY — repo cleared, bridge off",
-  "updated": ""
+  "url": "https://your-cloudflared-url.trycloudflare.com",
+  "note": "Bridge enabled + cloudflared tunnel",
+  "updated": "2026-07-24",
+  "status": "pending-tunnel"
 }

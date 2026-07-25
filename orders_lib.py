@@ -751,6 +751,7 @@ def user_order_actions_keyboard(oid: str) -> dict:
         "inline_keyboard": [
             [{"text": "🔄 Обновить статус", "callback_data": f"ord:status:{oid}"}],
             [{"text": "💬 Вопрос по проекту", "callback_data": f"ord:ask:{oid}"}],
+            [{"text": "📄 Договор + акт", "callback_data": f"ord:docs:{oid}"}],
             [
                 {"text": "📦 Все заказы", "callback_data": "ord:mine"},
                 {"text": "🛠 Новый", "callback_data": "ord:restart"},
@@ -764,16 +765,253 @@ def user_order_actions_keyboard(oid: str) -> dict:
 
 
 def owner_order_keyboard(oid: str) -> dict:
+    """Короткое уведомление о новом заказе + вход в карточку."""
     oid = str(oid)
     return {
         "inline_keyboard": [
+            [{"text": "📂 Открыть заказ", "callback_data": f"ord:o:open:{oid}"}],
             [
                 {"text": "✅ В работу", "callback_data": f"ord:w:{oid}"},
                 {"text": "✔️ Готово", "callback_data": f"ord:d:{oid}"},
             ],
-            [{"text": "❌ Отменить заказ", "callback_data": f"ord:x:{oid}"}],
+            [{"text": "❌ Отменить", "callback_data": f"ord:x:{oid}"}],
         ]
     }
+
+
+def owner_order_hub_keyboard(oid: str, *, user_id: int | None = None) -> dict:
+    """Полное управление заказом для владельца."""
+    oid = str(oid)
+    rows = [
+        [
+            {"text": "✅ В работу", "callback_data": f"ord:w:{oid}"},
+            {"text": "✔️ Готово", "callback_data": f"ord:d:{oid}"},
+        ],
+        [
+            {"text": "📜 Смотреть ТЗ", "callback_data": f"ord:o:tz:{oid}"},
+            {"text": "✏️ Править ТЗ", "callback_data": f"ord:o:editz:{oid}"},
+        ],
+        [
+            {"text": "💬 Написать клиенту", "callback_data": f"ord:o:msg:{oid}"},
+            {"text": "📄 Документы", "callback_data": f"ord:o:docs:{oid}"},
+        ],
+    ]
+    if user_id:
+        rows.append(
+            [{"text": "👤 Профиль клиента", "callback_data": f"ord:o:prof:{int(user_id)}"}]
+        )
+    rows.append([{"text": "❌ Отменить заказ", "callback_data": f"ord:x:{oid}"}])
+    rows.append(
+        [
+            {"text": "📋 Все заказы", "callback_data": "ord:o:list"},
+            {"text": "👥 Клиенты", "callback_data": "ord:o:clients"},
+        ]
+    )
+    rows.append([{"text": "🏠 Пульт", "callback_data": "menu:home"}])
+    return {"inline_keyboard": rows}
+
+
+def owner_docs_keyboard(oid: str) -> dict:
+    """Стопка документов по заказу."""
+    oid = str(oid)
+    return {
+        "inline_keyboard": [
+            [{"text": "📄 Договор", "callback_data": f"ord:o:docc:{oid}"}],
+            [{"text": "📋 Акт", "callback_data": f"ord:o:doca:{oid}"}],
+            [{"text": "📰 Кейс (черновик)", "callback_data": f"ord:o:case:{oid}"}],
+            [{"text": "📦 Все документы пачкой", "callback_data": f"ord:o:docall:{oid}"}],
+            [{"text": "« К заказу", "callback_data": f"ord:o:open:{oid}"}],
+        ]
+    }
+
+
+def owner_orders_list_keyboard(items: list[dict], *, limit: int = 12) -> dict:
+    """Список заказов кнопками."""
+    rows = []
+    for it in items[:limit]:
+        oid = str(it.get("id") or "")
+        st = str(it.get("status") or "?")
+        un = (it.get("username") or "").lstrip("@")
+        who = f"@{un}" if un else str(it.get("name") or it.get("user_id") or "")[:12]
+        kind = str(it.get("kind") or "")[:8]
+        price = it.get("price") or 0
+        mark = {
+            "new": "🆕",
+            "accepted": "✅",
+            "in_progress": "🛠",
+            "done": "✔️",
+            "cancelled": "❌",
+        }.get(st, "•")
+        label = f"{mark} {oid[:6]} · {kind} · {price}₽ · {who}"[:64]
+        rows.append([{"text": label, "callback_data": f"ord:o:open:{oid}"}])
+    rows.append(
+        [
+            {"text": "🔄 Обновить", "callback_data": "ord:o:list"},
+            {"text": "👥 Клиенты", "callback_data": "ord:o:clients"},
+        ]
+    )
+    rows.append([{"text": "🏠 Пульт", "callback_data": "menu:home"}])
+    return {"inline_keyboard": rows}
+
+
+def list_clients(*, limit: int = 20) -> list[dict]:
+    """Уникальные клиенты с заказами + агрегаты."""
+    by: dict[int, dict] = {}
+    for it in list_orders(limit=100):
+        try:
+            uid = int(it.get("user_id") or 0)
+        except Exception:
+            continue
+        if not uid:
+            continue
+        row = by.setdefault(
+            uid,
+            {
+                "user_id": uid,
+                "username": (it.get("username") or "").lstrip("@"),
+                "name": it.get("name") or "",
+                "orders": 0,
+                "open": 0,
+                "spent": 0,
+                "last_at": 0,
+            },
+        )
+        row["orders"] += 1
+        if it.get("username"):
+            row["username"] = str(it.get("username")).lstrip("@")
+        if it.get("name"):
+            row["name"] = it.get("name")
+        st = str(it.get("status") or "")
+        if st in ("new", "accepted", "in_progress"):
+            row["open"] += 1
+        if st == "done":
+            row["spent"] += int(it.get("price") or 0)
+        row["last_at"] = max(int(row.get("last_at") or 0), int(it.get("updated_at") or it.get("created_at") or 0))
+    out = sorted(by.values(), key=lambda x: -int(x.get("last_at") or 0))
+    return out[:limit]
+
+
+def owner_clients_keyboard(clients: list[dict]) -> dict:
+    rows = []
+    for c in clients[:15]:
+        uid = int(c.get("user_id") or 0)
+        un = c.get("username") or ""
+        who = f"@{un}" if un else str(c.get("name") or uid)[:14]
+        label = f"👤 {who} · {c.get('orders')}зак · {c.get('open')}откр"[:64]
+        rows.append([{"text": label, "callback_data": f"ord:o:prof:{uid}"}])
+    rows.append(
+        [
+            {"text": "📋 Заказы", "callback_data": "ord:o:list"},
+            {"text": "🏠 Пульт", "callback_data": "menu:home"},
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
+def format_client_profile(user_id: int) -> str:
+    """Профиль клиента: заказы, баланс, контакты."""
+    import html as H
+
+    uid = int(user_id)
+    items = list_user_orders(uid, limit=30)
+    un = ""
+    name = ""
+    if items:
+        un = (items[0].get("username") or "").lstrip("@")
+        name = str(items[0].get("name") or "")
+    bal_s = "—"
+    try:
+        import balance_lib as bal
+
+        bal_s = f"{bal.get_balance(uid)} ₽"
+    except Exception:
+        pass
+    open_n = sum(
+        1 for x in items if str(x.get("status") or "") in ("new", "accepted", "in_progress")
+    )
+    done_n = sum(1 for x in items if str(x.get("status") or "") == "done")
+    spent = sum(int(x.get("price") or 0) for x in items if str(x.get("status") or "") == "done")
+    who = f"@{un}" if un else (name or str(uid))
+    lines = [
+        f"👤 <b>Профиль клиента</b>",
+        f"{'━' * 16}",
+        f"{H.escape(str(who))}",
+        f"id <code>{uid}</code>",
+        f"💳 баланс: <b>{H.escape(str(bal_s))}</b>",
+        f"📦 заказов: <b>{len(items)}</b> · открытых <b>{open_n}</b> · сдано <b>{done_n}</b>",
+        f"💰 оплачено (сдано): <b>{spent}</b> ₽",
+        "",
+        "<b>Заказы</b>",
+    ]
+    if not items:
+        lines.append("пока нет")
+    for it in items[:12]:
+        kind = ORDER_TYPES.get(it.get("kind") or "", {}).get("title") or it.get("kind")
+        lines.append(
+            f"· <code>{H.escape(str(it.get('id')))}</code> · "
+            f"{H.escape(str(kind))} · {it.get('price')}₽ · "
+            f"{status_label(str(it.get('status') or ''))}"
+        )
+    return "\n".join(lines)
+
+
+def client_profile_keyboard(user_id: int, orders_list: list[dict] | None = None) -> dict:
+    uid = int(user_id)
+    rows = [[{"text": "💬 Написать в TG", "url": f"tg://user?id={uid}"}]]
+    # deep link by username if any
+    items = orders_list if orders_list is not None else list_user_orders(uid, limit=8)
+    un = ""
+    if items:
+        un = (items[0].get("username") or "").lstrip("@")
+    if un:
+        rows = [[{"text": f"💬 @{un}", "url": f"https://t.me/{un}"}]]
+    for it in items[:6]:
+        oid = str(it.get("id") or "")
+        st = str(it.get("status") or "")[:4]
+        rows.append(
+            [{"text": f"📂 {oid[:8]} · {st}", "callback_data": f"ord:o:open:{oid}"}]
+        )
+    rows.append(
+        [
+            {"text": "📋 Все заказы", "callback_data": "ord:o:list"},
+            {"text": "👥 Клиенты", "callback_data": "ord:o:clients"},
+        ]
+    )
+    rows.append([{"text": "🏠 Пульт", "callback_data": "menu:home"}])
+    return {"inline_keyboard": rows}
+
+
+def format_owner_orders_list(items: list[dict]) -> str:
+    import html as H
+
+    if not items:
+        return "🛠 <b>Заказы</b>\nПока пусто."
+    open_n = sum(
+        1 for x in items if str(x.get("status") or "") in ("new", "accepted", "in_progress")
+    )
+    lines = [
+        f"🛠 <b>Заказы</b> · {len(items)} · открытых <b>{open_n}</b>",
+        "Жми кнопку ниже",
+    ]
+    return "\n".join(lines)
+
+
+def format_tz_full(item: dict) -> str:
+    import html as H
+
+    oid = H.escape(str(item.get("id") or ""))
+    kind = ORDER_TYPES.get(item.get("kind") or "", {}).get("title") or item.get("kind")
+    brief = H.escape(item.get("brief") or "—")
+    dev = H.escape(str(item.get("dev_brief") or "")[:1500])
+    lines = [
+        f"<b>ТЗ</b> · <code>{oid}</code> · {H.escape(str(kind))} · {item.get('price')} ₽",
+        status_label(str(item.get("status") or "")),
+        "",
+        brief,
+    ]
+    if dev:
+        lines.extend(["", "<b>Для исполнителя</b>", dev])
+    return "\n".join(lines)
 
 
 def format_order_card(item: dict, *, for_owner: bool = False) -> str:
@@ -790,59 +1028,37 @@ def format_order_card(item: dict, *, for_owner: bool = False) -> str:
     oid = H.escape(str(item.get("id") or ""))
 
     next_map = {
-        "new": "Дальше: оплата / подтверждение → старт",
-        "accepted": "Дальше: берём в работу",
-        "in_progress": "Дальше: делаем · пиши, если нужны правки ТЗ",
-        "done": "Дальше: проверь результат · гарантия 2 сут.",
-        "cancelled": "Дальше: /order если нужен новый",
+        "new": "Ждём оплату / старт",
+        "accepted": "В очереди",
+        "in_progress": "В работе — можно писать",
+        "done": "Сдан · гарантия 2 сут.",
+        "cancelled": "Закрыт",
     }
     lines = [
-        f"🛠 <b>Заказ</b> <code>{oid}</code>",
-        f"{'━' * 16}",
-        f"<b>{H.escape(str(kind))}</b> · {price}",
-        "",
-        f"<b>Этап</b>  {status_label(st)}",
-        f"<code>{bar}</code>  {step}/{total}",
-        f"<i>{H.escape(stage)}</i>",
-        f"➡️ {H.escape(next_map.get(st, '—'))}",
-        "",
-        f"👤 Ведёт: <b>{H.escape(worker)}</b>",
-        f"⏱ Ориентир: <b>{H.escape(eta)}</b>",
-        f"🕒 обновлено: {time.strftime('%d.%m %H:%M', time.localtime(int(item.get('updated_at') or time.time())))}",
+        f"<b>Заказ</b> <code>{oid}</code> · {H.escape(str(kind))} · {price}",
+        f"{status_label(st)}  <code>{bar}</code>",
+        f"{H.escape(next_map.get(st, stage))}",
+        f"Ведёт: {H.escape(worker)} · срок: {H.escape(eta)}",
     ]
-    # timeline tail
-    events = list(item.get("events") or [])[-3:]
-    if events:
-        lines.append("")
-        lines.append("<b>История</b>")
-        for e in events:
-            ts = int(e.get("ts") or 0)
-            when = time.strftime("%d.%m %H:%M", time.localtime(ts)) if ts else "—"
-            lines.append(f"· {when} — {H.escape(str(e.get('text') or e.get('code') or ''))}")
-    lines.extend(
-        [
-            "",
-            f"<b>ТЗ</b>",
-            H.escape((item.get("brief") or "—")[:550]),
-            "",
-            "⚠️ Хостинг / VPS / домен — не входят.",
-            "🛡 Гарантия 2 сут. · правки 1 сут. · /terms",
-        ]
-    )
     if for_owner:
         un = item.get("username")
         who = f"@{un}" if un else item.get("name")
-        lines.insert(
-            2,
-            f"клиент: {H.escape(str(who))} · <code>{item.get('user_id')}</code>",
-        )
-    # upsell soft line if done
-    if st == "done":
-        lines.append("")
-        lines.append(
-            "💡 <i>Часто к такому заказу берут бот-заявки или доработки — "
-            "спроси в «Вопрос по проекту» или /order.</i>"
-        )
+        lines.insert(1, f"Клиент: {H.escape(str(who))} · <code>{item.get('user_id')}</code>")
+    events = list(item.get("events") or [])[-2:]
+    if events:
+        tail = []
+        for e in events:
+            ts = int(e.get("ts") or 0)
+            when = time.strftime("%d.%m %H:%M", time.localtime(ts)) if ts else ""
+            tail.append(f"{when} {H.escape(str(e.get('text') or ''))}")
+        lines.append("· " + " · ".join(tail))
+    brief = (item.get("brief") or "—").strip()
+    if for_owner:
+        lines.append(f"\n<b>ТЗ</b>\n{H.escape(brief[:900])}")
+    else:
+        lines.append(f"\n{H.escape(brief[:400])}")
+    if st == "done" and not for_owner:
+        lines.append("\nНужны доработки — «Вопрос по проекту» или /order")
     return "\n".join(lines)
 
 

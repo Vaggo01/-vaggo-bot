@@ -15,87 +15,97 @@ _ollama_cache: dict[str, Any] = {"t": 0.0, "ok": False}
 _brain_cache: dict[str, Any] = {"t": 0.0, "data": None}
 
 
-SYSTEM_CHANNEL = """Ты — главный автор Telegram-канала «Вагго» (@Vaggo01). Пишешь так, чтобы пост ХОТЕЛОСЬ дочитать и сохранить.
+# Общий «мозг» Вагго — умнее, честнее, без заглушек
+SYSTEM_BRAIN = """Ты — Вагго: умный, прямой, с характером. Канал @Vaggo01 (ИИ, стек, дисциплина, лайфхаки).
 
-У тебя есть live web/X search — для свежих фактов, цен, дат, релизов ИИ пользуйся им.
-Не выдумывай цифры; если нашёл в поиске — опирайся на них.
+УМЕНИЕ:
+- Думаешь на 1 шаг глубже обычного «ответа нейросети»: сравнение, trade-off, «когда ДА / когда НЕТ».
+- Факты (цены, даты, релизы, бенчмарки, «кто лучше сейчас») — только из live web/X search или честно «на практике / без точной цифры».
+- Не выдумывай топ-рейтинги, цены и «исследования». Неуверен — скажи прямо.
+- Конкретика > общие слова. Лучше 1 схема, чем 5 пустых абзацев.
+- Не токсичь, не кликбейт «шок», не корпоративный FAQ, не «как языковая модель…».
 
-ГЛАВНОЕ:
-- Интересно + полезно. Не канцелярит, не «в этом посте мы разберём», не скучный учебник.
+ЗАПРЕТ ЗАГЛУШЕК (всегда):
+«Слышу», «кинь мысль яснее», «продолжим как нормальный разговор», «на связи»,
+«отличный вопрос», «спасибо за коммент», «чем могу помочь», «напиши подробнее» без ответа по сути.
+"""
+
+SYSTEM_CHANNEL = SYSTEM_BRAIN + """
+РОЛЬ: главный автор постов Telegram-канала «Вагго».
+
+ГЛАВНОЕ В ПОСТЕ:
+- Чтобы ХОТЕЛОСЬ дочитать и сохранить.
 - Крючок с первой строки (сцена, удар, вопрос, парадокс) — не «Друзья, сегодня поговорим».
 - Читатель уносит: правило, схему, выбор «когда что», мини-эксперимент.
 - Живой ритм: короткие абзацы, воздух, 1–2 сильных формулировки.
-- Можно лёгкая ирония и характер. Без токсичности и кликбейта «шок».
+- Лёгкая ирония ок. Канцелярит и вода — нет.
+- Для новостей/релизов ИИ: live search обязателен; цифры и названия — точные.
 
 ГОЛОС:
-- обращение «Друзья» уместно, но не в каждой фразе;
+- «Друзья» уместно, но не в каждой фразе;
 - эмодзи умеренно (заголовок + акценты);
 - HTML только: <b> <i> <code> — НЕ markdown **;
-- длина обычно 900–1800 знаков (если не просили гайд).
+- длина обычно 1000–1800 знаков (если не просили гайд).
 
 РУБРИКИ:
 - Вечерний Вагго — мысль + 1 действие;
-- Битва нейросетей — ИИ: честно, practically, «когда брать»;
+- Битва нейросетей — ИИ честно, practically, «когда брать»;
 - Прокачка — тело, дисциплина;
 - Кибер-Лайфхак — 1 фишка, сразу;
 - Проект — LAB/OS/бот, закулисье без нытья.
 
-ПРАВДА: не выдумывай цены и топ-рейтинги. Неуверен — «на практике» или проверь поиском.
-
 СТРУКТУРА:
 1) крючок
-2) мясо (история/сравнение/шаги)
+2) мясо (история / сравнение / шаги)
 3) вывод + цепкий вопрос в комменты
-4) в конце ссылка: 👉 <a href=\"https://t.me/Vaggo01\">t.me/Vaggo01</a> если уместно
+4) в конце: 👉 <a href=\"https://t.me/Vaggo01\">t.me/Vaggo01</a> если уместно
 
 Ответ = ТОЛЬКО готовый пост, без преамбулы."""
 
 
-SYSTEM_COMMENT = """Ты — Вагго: живая нейронка Telegram-канала @Vaggo01.
-С тобой общаются в комментариях — отвечай как умный собеседник, не как скрипт поддержки.
+SYSTEM_COMMENT = SYSTEM_BRAIN + """
+РОЛЬ: живой собеседник в комментариях @Vaggo01 (не саппорт-скрипт).
 
-У тебя есть live-поиск (web + X), когда вопрос про даты, новости, «когда/сколько сейчас».
-Пользуйся им для фактов; не выдумывай цифры и даты.
+Live web/X search — если вопрос про даты, новости, «кто/сколько сейчас», цены, релизы.
+Пользуйся search; не выдумывай.
 
-КТО ТЫ:
-- характер канала: дружеский, прямой, с лёгкой иронией, без канцелярита;
-- можно спорить, шутить, развивать мысль, спрашивать в ответ;
-- ты «Вагго», не «помощник OpenAI» и не корпоративный FAQ.
+РЕЖИМЫ (смотри user):
+1) seed — первый коммент под постом: по теме поста, цепляешь диалог.
+2) ответ подписчику — якорь = ЕГО сообщение; пост = фон.
 
-ДВА РЕЖИМА (смотри инструкцию в user-сообщении):
-1) ПЕРВЫЙ КОММЕНТ ПОД ПОСТОМ (seed) — пишешь про ТЕМУ ПОСТА, цепляешь разговор.
-2) ОТВЕТ ПОДПИСЧИКУ — якорь = его сообщение. Пост только фон, если уместно.
+КАК ОТВЕЧАТЬ:
+- сначала смысл его реплики (вопрос / шутка / мнение / спор);
+- короткий вопрос → чёткий ответ + 1 цепляющая мысль или вопрос;
+- «кто лучше / что взять» → критерий + когда A / когда B, без фанатизма;
+- промпт/код/стек → конкретный совет, можно мини-шаблон;
+- привет / «огонь» — коротко, по-человечески, без эссе;
+- пост подтягивай, если реплика про пост или без него пусто;
+- ссылки — если просят «где открыть» или это реально помогает;
+- 1–4 предложения обычно; на сложный/практический вопрос — можно развёрнутее (рецепт, шаги, схема);
+- тема ЛЮБАЯ: ИИ, еда, спорт, быт — отвечай полноценно по запросу, не отшивай «это не про канал»;
+- пост канала — только фон, если уместно; не своди всё к рекламе @Vaggo01;
+- plain text, без HTML/markdown **.
 
-КАК ОТВЕЧАТЬ подписчику:
-- сначала по смыслу того, что он написал (вопрос / шутка / мнение);
-- если вопрос короткий («когда финал», «кто лучше») — ответь по делу, не отпиской;
-- на фактические вопросы дай точный короткий ответ + 1 цепляющая реплика;
-- ЗАПРЕЩЕНО: «Слышу», «кинь мысль яснее», «продолжим как нормальный разговор»,
-  «на связи», «напиши яснее» — это звучит как бот-заглушка;
-- пост подтягивай, если его реплика про пост или без поста ответ пустой;
-- свободно: короче на «привет», развёрнутее на вопрос;
-- не «отличный вопрос / спасибо за коммент»;
-- ссылки — только если просят «где открыть / какую сетку»;
-- не токсичь; обычный текст, можно лёгкий markdown **но Telegram лучше plain**.
-
-Ответ = только реплика, без кавычек и без «Вот мой ответ:»."""
-
-SYSTEM_SEED = """Ты — Вагго, нейронка канала @Vaggo01.
-Пишешь ПЕРВЫЙ комментарий под свежим постом канала.
+Ответ = только реплика, без кавычек и «Вот мой ответ:»."""
+SYSTEM_SEED = SYSTEM_BRAIN + """
+РОЛЬ: ПЕРВЫЙ комментарий под свежим постом @Vaggo01.
 
 Задача:
-- 1–3 живых предложения строго ПО ТЕМЕ ПОСТА (не про погоду, не «классный пост» в пустоту);
-- цепляешь диалог: мысль, угол, вопрос подписчикам;
-- тон Вагго: прямой, дружеский, без канцелярита;
+- 1–3 живых предложения СТРОГО по теме поста (не «классный пост» в пустоту);
+- добавь угол, который пост не разжевал, или острый вопрос подписчикам;
+- тон Вагго: прямой, умный, без канцелярита;
 - без markdown, без HTML, без «как ИИ…».
 
 Ответ = только текст комментария."""
 
-SYSTEM_GUIDE = """Ты пишешь ПОЛЕЗНЫЙ гайд для Telegram-канала «Вагго».
-Формат HTML (<b> <i> <code>), без markdown.
-Объём 2500–3800 символов (лимит сообщения ~4096).
-Структура: заголовок рубрики, крючок, разбор пунктами (сила/когда брать/слабее или шаги), связки/чеклист, вопрос в комменты, ссылка t.me/Vaggo01.
-Без воды и кликбейта. Факты осторожно. Ответ = только гайд."""
+SYSTEM_GUIDE = SYSTEM_BRAIN + """
+РОЛЬ: автор длинного ПОЛЕЗНОГО гайда для @Vaggo01.
+
+Формат HTML: <b> <i> <code> — без markdown.
+Объём 2500–3800 символов (лимит ~4096).
+Структура: рубрика → крючок → разбор (сила / когда брать / слабее или шаги) → чеклист → вопрос в комменты → ссылка t.me/Vaggo01.
+Факты — search или осторожно. Без воды и кликбейта.
+Ответ = только гайд."""
 
 
 def _xai_key(cfg: dict) -> str:
@@ -267,35 +277,101 @@ def _bridge_vision(
     return str(data.get("text") or "").strip()
 
 
+def _is_cloud_host(cfg: dict) -> bool:
+    """Bothost / cloud: сессии ~/.grok на сервере обычно нет."""
+    import os
+
+    mode = str(cfg.get("bot_host_mode") or "").lower().strip()
+    if mode in ("cloud", "bothost", "hosting", "remote"):
+        return True
+    if (os.environ.get("BOT_ID") or "").strip():
+        return True
+    if (os.environ.get("BOTHOST") or os.environ.get("BOTHHOST") or "").strip():
+        return True
+    return False
+
+
 def _grok_bearer(cfg: dict) -> tuple[str, str]:
     """
     Bearer для api.x.ai.
     source = bridge | session | api_key | ''
-    Приоритет: мост (облако) → Super-сессия ПК → xai_api_key.
-    Сессия выше битого ключа без кредитов.
+
+    Локалка: bridge → Super-session → xai_api_key
+    Cloud/Bothost: bridge → xai_api_key → session (если вдруг есть)
     """
     if _bridge_url(cfg):
         return "bridge", "bridge"
+
+    cloud = _is_cloud_host(cfg)
+    key = _xai_key(cfg)
+    sess = ""
     if cfg.get("use_grok_session", True):
         try:
             from grok_auth import session_token
 
-            tok = session_token()
-            if tok:
-                return tok, "session"
+            sess = (session_token() or "").strip()
         except Exception:
-            pass
-    key = _xai_key(cfg)
+            sess = ""
+
+    if cloud:
+        if key:
+            return key, "api_key"
+        if sess:
+            return sess, "session"
+        return "", ""
+
+    # local: session (Super) preferred over paid API credits
+    if sess:
+        return sess, "session"
     if key:
         return key, "api_key"
     return "", ""
 
 
+_bridge_health_cache: dict[str, Any] = {"t": 0.0, "ok": False, "url": ""}
+
+
+def _bridge_healthy(cfg: dict, *, force: bool = False) -> bool:
+    """Реальный /health моста (кэш 25с), чтобы cloud не думал «grok ok» в пустоту."""
+    url = _bridge_url(cfg)
+    if not url:
+        return False
+    now = time.time()
+    if (
+        not force
+        and _bridge_health_cache.get("url") == url
+        and (now - float(_bridge_health_cache.get("t") or 0)) < 25
+    ):
+        return bool(_bridge_health_cache.get("ok"))
+    ok = False
+    try:
+        headers = {}
+        sec = _bridge_secret(cfg)
+        if sec:
+            headers["X-Bridge-Secret"] = sec
+        r = requests.get(f"{url}/health", headers=headers, timeout=4)
+        ok = bool(r.ok) and ("ok" in (r.text or "").lower() or True)
+        if r.ok:
+            try:
+                data = r.json() if r.content else {}
+                if isinstance(data, dict) and data.get("ok") is False:
+                    ok = False
+                elif isinstance(data, dict) and "grok" in data and not data.get("grok"):
+                    ok = False
+            except Exception:
+                ok = r.ok
+    except Exception:
+        ok = False
+    _bridge_health_cache["t"] = now
+    _bridge_health_cache["ok"] = ok
+    _bridge_health_cache["url"] = url
+    return ok
+
+
 def grok_ok(cfg: dict) -> bool:
     tok, src = _grok_bearer(cfg)
     if src == "bridge":
-        # быстрый health (кэш 20с)
-        return True
+        return _bridge_healthy(cfg)
     return bool(tok)
 
 
@@ -352,6 +428,18 @@ def brain_status(
             active = "ollama"
         else:
             active = "template"
+
+    hint = ""
+    if active in ("none", "template") or not g:
+        if _is_cloud_host(cfg):
+            if not _bridge_url(cfg) and not _xai_key(cfg):
+                hint = "Bothost: задай XAI_API_KEY или GROK_BRIDGE_URL+SECRET"
+            elif _bridge_url(cfg) and not _bridge_healthy(cfg):
+                hint = "bridge URL есть, но /health мёртв — включи ПК + tunnel"
+            else:
+                hint = "Grok offline — проверь ключ / bridge"
+        else:
+            hint = "локально: grok login  или xai_api_key"
     sess = {}
     try:
         from grok_auth import session_info
@@ -363,7 +451,7 @@ def brain_status(
         "mode": mode,
         "active": active,
         "grok": g,
-        "grok_source": gsrc,
+        "grok_source": gsrc if g else (gsrc or "none"),
         "ollama": o,
         "grok_model": cfg.get("grok_model") or cfg.get("grok_full_model") or "grok-4.5",
         "ollama_model": cfg.get("ollama_model") or "qwen2.5:7b",
@@ -371,6 +459,9 @@ def brain_status(
         "grok_web_search": bool(cfg.get("grok_web_search", True)),
         "grok_x_search": bool(cfg.get("grok_x_search", True)),
         "session": sess,
+        "hint": hint,
+        "cloud": _is_cloud_host(cfg),
+        "host_mode": str(cfg.get("bot_host_mode") or ("cloud" if _is_cloud_host(cfg) else "local")),
     }
     _brain_cache["data"] = data
     _brain_cache["t"] = now
@@ -453,14 +544,32 @@ def grok_chat(
                 max_tokens=max_tokens,
             )
         except Exception as e:
-            print("bridge chat fail", e, flush=True)
-            # fall through to local key/session
+            print("bridge chat fail → fallback api/session", e, flush=True)
+            # fall through to api key / session (ignore dead bridge URL)
     token, source = _grok_bearer(cfg)
     if source == "bridge":
-        raise RuntimeError(f"Grok bridge недоступен: {_bridge_url(cfg)}")
+        # URL есть, но мост уже упал выше — пробуем ключ/сессию напрямую
+        key = _xai_key(cfg)
+        if key:
+            token, source = key, "api_key"
+        else:
+            sess = ""
+            if cfg.get("use_grok_session", True):
+                try:
+                    from grok_auth import session_token
+
+                    sess = (session_token() or "").strip()
+                except Exception:
+                    sess = ""
+            if sess:
+                token, source = sess, "session"
+            else:
+                raise RuntimeError(
+                    f"Grok bridge недоступен и нет api_key/session: {_bridge_url(cfg)}"
+                )
     if not token:
         raise RuntimeError(
-            "Нет доступа к Grok: grok login / xai_api_key / GROK_BRIDGE_URL"
+            "Нет доступа к Grok: grok login / XAI_API_KEY / GROK_BRIDGE_URL"
         )
     base = (cfg.get("xai_base_url") or "https://api.x.ai/v1").rstrip("/")
     headers = {
@@ -897,12 +1006,14 @@ def generate_post(topic: str, *, rubric: str = "", full_brain: bool = True) -> s
         f"Рубрика: {rubric or 'подбери сам по теме'}\n"
         f"Тема / бриф: {topic}\n\n"
         f"Рубрики канала:\n{rubrics}\n\n"
-        f"Напиши пост 1000–1700 знаков: цепкий, живой, с пользой. "
-        f"Запрещено: скучный тон, вода, «сегодня поговорим», список ради списка без характера. "
-        f"Нужен крючок, мясо и вопрос в комменты."
+        f"Напиши пост 1100–1800 знаков: умный, цепкий, с реальной пользой.\n"
+        f"Если тема про новости/релизы/цены ИИ — сделай live search и опирайся на свежие факты.\n"
+        f"Дай читателю: 1) крючок 2) мясо (схема/сравнение/шаги) 3) правило «когда что» "
+        f"4) вопрос в комменты.\n"
+        f"Запрещено: вода, «сегодня поговорим», пустой список, кликбейт, выдуманные цифры."
     )
     try:
-        # full_brain: сильнее модель + выше temperature
+        # full_brain: сильнее модель + tools + живая temperature
         if full_brain:
             model = (
                 cfg.get("grok_post_model")
@@ -914,12 +1025,21 @@ def generate_post(topic: str, *, rubric: str = "", full_brain: bool = True) -> s
                 SYSTEM_CHANNEL,
                 user,
                 model=model,
-                temperature=0.72,
+                temperature=float(cfg.get("post_temperature") or 0.68),
                 tools=True,
+                max_tokens=int(cfg.get("post_max_tokens") or 2200),
             )
             text = format_html_light(raw.strip())
             return text
-        raw, engine = llm_chat(cfg, SYSTEM_CHANNEL, user, temperature=0.65)
+        raw, engine = llm_chat(
+            cfg,
+            SYSTEM_CHANNEL,
+            user,
+            temperature=0.65,
+            tools=True,
+            prefer_fast=False,
+            max_tokens=int(cfg.get("post_max_tokens") or 2200),
+        )
         text = format_html_light(raw)
         return text
     except Exception:
@@ -941,11 +1061,30 @@ def generate_guide(topic: str, *, rubric: str = "Битва нейросетей
     user = (
         f"Рубрика: {rubric}\n"
         f"Тема гайда: {topic}\n\n"
-        f"Сделай развёрнутый практический гайд 2500–3800 символов. "
-        f"Списки, сравнения, «когда брать», чеклист в конце."
+        f"Сделай развёрнутый практический гайд 2500–3800 символов.\n"
+        f"Live search если нужны свежие факты/модели/цены.\n"
+        f"Списки, сравнения, «когда брать / когда нет», чеклист, без воды."
     )
     try:
-        raw, _ = llm_chat(cfg, SYSTEM_GUIDE, user, temperature=0.45)
+        model = (
+            cfg.get("grok_post_model")
+            or cfg.get("grok_full_model")
+            or "grok-4.5"
+        )
+        if grok_ok(cfg):
+            raw = grok_chat(
+                cfg,
+                SYSTEM_GUIDE,
+                user,
+                model=model,
+                temperature=0.5,
+                tools=True,
+                max_tokens=4000,
+            )
+        else:
+            raw, _ = llm_chat(
+                cfg, SYSTEM_GUIDE, user, temperature=0.5, tools=True, prefer_fast=False
+            )
         text = format_html_light(raw)
         if len(text) > 4090:
             text = text[:4085].rsplit("\n", 1)[0] + "…"
@@ -982,10 +1121,15 @@ def _clean_comment_text(text: str, max_len: int) -> str:
         if text.startswith(bad):
             text = text[len(bad) :]
     # citations / markdown → telegram-friendly
-    text = re.sub(r"\[\[(\d+)\]\]\((https?://[^)]+)\)", r"(\2)", text)
-    text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1 \2", text)
+    text = re.sub(r"\[\[(\d+)\]\]\((https?://[^)]+)\)", "", text)
+    text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1", text)
+    # голые длинные wiki/url в скобках — убрать шум из комментов
+    text = re.sub(r"\((https?://[^)]{40,})\)", "", text)
+    text = re.sub(r"https?://(?:en|ru)\.wikipedia\.org\S+", "", text)
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\1", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     if len(text) > max_len:
         cut = text[: max_len - 1]
         n = cut.rfind("\n")
@@ -1006,21 +1150,40 @@ def generate_seed_comment(post_text: str) -> str:
     if not post:
         return "Ну что, друзья — кто уже в теме? Кидайте мысли 🔥"
     user = (
-        "РЕЖИМ: первый комментарий под постом (seed).\n"
-        "Напиши 1–3 предложения строго по теме этого поста, живо, как Вагго.\n\n"
-        f"Текст поста:\n{post[:1200]}\n"
+        "РЕЖИМ: seed (первый комментарий под постом).\n"
+        "1–3 предложения по теме поста: умный угол + крючок в диалог.\n"
+        "Не пересказывай пост. Не хвали пост в пустоту.\n\n"
+        f"Текст поста:\n{post[:1800]}\n"
     )
     try:
-        raw, _ = llm_chat(cfg, SYSTEM_SEED, user, temperature=0.7, prefer_fast=False)
-        return _clean_comment_text(raw, 400) or "Ок, пост вышел — что цепляет сильнее всего? 🔥"
+        model = (
+            cfg.get("grok_post_model")
+            or cfg.get("grok_full_model")
+            or cfg.get("grok_model")
+            or "grok-4.5"
+        )
+        if grok_ok(cfg):
+            raw = grok_chat(
+                cfg,
+                SYSTEM_SEED,
+                user,
+                model=model,
+                temperature=0.72,
+                tools=False,
+                max_tokens=280,
+            )
+        else:
+            raw, _ = llm_chat(
+                cfg, SYSTEM_SEED, user, temperature=0.72, prefer_fast=False, tools=False
+            )
+        return _clean_comment_text(raw, 420) or "Ок, пост вышел — что цепляет сильнее всего? 🔥"
     except Exception:
-        # короткий фолбэк из начала поста
         line = post.split("\n")[0][:80].replace("<b>", "").replace("</b>", "")
         return f"Поехали 🔥 {line}… кто что думает?"
 
 
 def _comment_needs_live_facts(text: str) -> bool:
-    """Нужен live search (медленно) — только если явно включён comment_search."""
+    """Нужен live search — факты, новости, «кто/сколько сейчас»."""
     low = (text or "").lower()
     keys = (
         "когда ",
@@ -1029,15 +1192,58 @@ def _comment_needs_live_facts(text: str) -> bool:
         "сколько сейчас",
         "курс ",
         "цена ",
+        "стоит ",
         "новост",
         "финал чм",
         "кто выиграл",
         "актуальн",
         "на данный момент",
+        "сейчас какая",
+        "сейчас какой",
+        "вышла ли",
+        "вышел ли",
+        "релиз",
+        "обновлен",
+        "gpt-5",
+        "gpt5",
+        "gemini 3",
+        "claude 4",
+        "кто лучше",
+        "что лучше",
+        "сравни",
+        "vs ",
+        " против ",
     )
     if any(k in low for k in keys):
         return True
-    if low.startswith(("когда", "сколько", "где проходит", "где будет")):
+    if low.startswith(("когда", "сколько", "где проходит", "где будет", "кто ", "что лучше")):
+        return True
+    return False
+
+
+def _comment_is_trivial(text: str) -> bool:
+    """Супер-короткая реплика без смысла — можно instant/fast."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    if len(t) <= 12 and any(c in t for c in ("🔥", "👍", "❤", "❤️", "💪", "😂", "🤣", "👏", "👀")):
+        return True
+    low = t.lower()
+    if len(t) <= 18 and any(
+        w in low for w in ("ок", "окей", "ага", "угу", "норм", "понял", "ясно", "ладно")
+    ):
+        return True
+    if len(t) <= 24 and any(
+        w in low for w in ("спасибо", "благодар", "thx", "thanks", "пасиб")
+    ):
+        return True
+    if len(t) <= 28 and any(
+        w in low for w in ("привет", "здаров", "здарова", "хай", "hello", "йо", "доброе", "добрый")
+    ):
+        return True
+    if len(t) <= 16 and any(
+        w in low for w in ("крут", "топ", "класс", "огонь", "имба", "пушка", "+1", "согласен")
+    ):
         return True
     return False
 
@@ -1048,51 +1254,34 @@ def try_instant_comment(
     username: str = "",
 ) -> str | None:
     """
-    Мгновенный ответ без Grok (0.05с) для простых реплик.
-    None = нужен LLM.
+    Мгновенный ответ без Grok только для совсем пустых реплик.
+    Всё содержательное → LLM (умный Grok).
     """
     t = (comment_text or "").strip()
     if not t:
         return None
+    # если не тривиально — всегда мозг
+    if not _comment_is_trivial(t):
+        return None
     low = t.lower()
     hi = ""
-    # только супер-короткие / эмоции
-    if len(t) <= 40 and any(
-        w in low
-        for w in (
-            "привет",
-            "здаров",
-            "здарова",
-            "хай",
-            "hello",
-            "йо",
-            "ку ",
-            "доброе",
-            "добрый",
-        )
-    ):
-        return f"{hi}йо 🔥 на связи. Что на уме?"
-    if len(t) <= 24 and any(
-        w in low for w in ("спасибо", "благодар", "thx", "thanks", "пасиб")
-    ):
+    if any(w in low for w in ("привет", "здаров", "здарова", "хай", "hello", "йо", "доброе", "добрый")):
+        return f"{hi}йо 🔥 что на уме — кидай, разберём"
+    if any(w in low for w in ("спасибо", "благодар", "thx", "thanks", "пасиб")):
         return f"{hi}всегда 🔥 заходи ещё"
-    if len(t) <= 12 and any(w in t for w in ("🔥", "👍", "❤️", "❤", "💪", "😂", "🤣")):
-        return f"{hi}зашло 🔥 а ты сам что думаешь?"
-    if len(t) <= 18 and any(
-        w in low for w in ("ок", "окей", "ладно", "понял", "ясно", "норм", "ага", "угу")
-    ):
-        return f"{hi}ок 👍 если что — пиши"
-    if len(t) <= 20 and any(
-        w in low for w in ("крут", "топ", "класс", "огонь", "имба", "пушка")
-    ):
-        return f"{hi}огонь 🔥 кидай ещё мысль — разберём"
+    if any(c in t for c in ("🔥", "👍", "❤️", "❤", "💪", "😂", "🤣", "👏")):
+        return f"{hi}зашло 🔥 а ты сам с какой стороны смотришь?"
+    if any(w in low for w in ("ок", "окей", "ладно", "понял", "ясно", "норм", "ага", "угу")):
+        return f"{hi}ок 👍 если копнуть глубже — пиши"
+    if any(w in low for w in ("крут", "топ", "класс", "огонь", "имба", "пушка", "+1", "согласен")):
+        return f"{hi}огонь 🔥 кинь свой опыт — с чем сравниваешь?"
     return None
 
 
-SYSTEM_COMMENT_FAST = """Ты Вагго (@Vaggo01) — живой собеседник в комментах.
-Ответь коротко (1–3 предложения), по делу, с характером.
-Без «отличный вопрос», без «Слышу», без канцелярита, без markdown **.
-Только текст реплики."""
+SYSTEM_COMMENT_FAST = SYSTEM_BRAIN + """
+РОЛЬ: ответ в комментах @Vaggo01.
+По делу, с характером. На короткий вопрос — коротко; на «дай рецепт/разбор» — полно по шагам.
+Тема любая, не отшивай. Без HTML/markdown **. Только текст реплики."""
 
 
 def generate_comment_reply(
@@ -1102,11 +1291,11 @@ def generate_comment_reply(
     username: str = "",
 ) -> str:
     """
-    Ответ подписчику. Скорость > энциклопедия:
-    instant → fast 4.3 без search → (опц.) search только если comment_search=true.
+    Умный ответ подписчику.
+    trivial → instant; факты → full + search; остальное → full model, без тупых заглушек.
     """
     cfg = load_config()
-    # 0) мгновенно без AI
+    # 0) instant только для пустяков
     if cfg.get("comment_instant_simple", True):
         inst = try_instant_comment(comment_text, username=username)
         if inst:
@@ -1114,22 +1303,30 @@ def generate_comment_reply(
             return inst
 
     free = bool(cfg.get("comment_free_chat", True))
-    max_len = int(cfg.get("comment_max_chars") or (500 if free else 350))
-    temp = float(cfg.get("comment_temperature") or 0.55)
-    # search в комментах ВЫКЛ по умолчанию (медленно). Вкл: comment_search=true
-    allow_search = bool(cfg.get("comment_search", False)) or bool(
-        cfg.get("comment_always_search", False)
-    )
-    needs_facts = allow_search and _comment_needs_live_facts(comment_text)
-    prefer_fast = not needs_facts
+    # полный ответ даже на оффтоп (рецепт, спорт…) — не режем в 3 фразы
+    max_len = int(cfg.get("comment_max_chars") or (1200 if free else 700))
+    temp = float(cfg.get("comment_temperature") or 0.62)
+    # search: по умолчанию ВКЛ для факт-вопросов (можно вырубить comment_search=false)
+    allow_search = cfg.get("comment_search", True)
+    if cfg.get("comment_always_search"):
+        allow_search = True
+    needs_facts = bool(allow_search) and _comment_needs_live_facts(comment_text)
+    trivial = _comment_is_trivial(comment_text)
+    # умный путь по умолчанию; fast только если comment_prefer_fast и trivial
+    force_fast = bool(cfg.get("comment_prefer_fast", False)) and trivial and not needs_facts
+    prefer_fast = force_fast
 
     user = (
         f"Собеседник: {username or 'человек'}\n"
         f"Написал: {(comment_text or '').strip()}\n"
-        "Ответь по его реплике. 1–3 предложения, живо.\n"
+        "Ответь УМНО и ПОЛНО по его реплике — даже если тема не про канал/ИИ.\n"
+        "Смысл → нормальный ответ (шаги/рецепт/схема если просят) → (опц.) короткий вопрос.\n"
+        "Без заглушек, без «отличный вопрос», без «это не тема канала».\n"
     )
+    if needs_facts:
+        user += "Нужны свежие факты — используй live search, не выдумывай.\n"
     if post_context:
-        user += f"Фон поста (не пересказывай): {post_context[:280]}\n"
+        user += f"Фон поста (не пересказывай, якорь если уместно):\n{post_context[:700]}\n"
     try:
         print(
             f"comment path fast={prefer_fast} facts={needs_facts} "
@@ -1137,34 +1334,88 @@ def generate_comment_reply(
             flush=True,
         )
         sys_p = SYSTEM_COMMENT_FAST if prefer_fast else SYSTEM_COMMENT
-        raw, eng = llm_chat(
-            cfg,
-            sys_p,
-            user,
-            temperature=temp,
-            prefer_fast=prefer_fast,
-            max_tokens=int(cfg.get("comment_max_tokens") or (180 if prefer_fast else 320)),
-            tools=bool(needs_facts),
+        # полный мозг для нормальных комментов
+        mt = int(
+            cfg.get("comment_max_tokens")
+            or (200 if prefer_fast else (700 if needs_facts else 550))
         )
+        if not prefer_fast and grok_ok(cfg):
+            model = (
+                cfg.get("grok_full_model")
+                or cfg.get("grok_model")
+                or "grok-4.5"
+            )
+            raw = grok_chat(
+                cfg,
+                sys_p,
+                user,
+                model=model,
+                temperature=temp,
+                tools=bool(needs_facts or cfg.get("comment_always_search")),
+                max_tokens=mt,
+            )
+            eng = "grok"
+        else:
+            raw, eng = llm_chat(
+                cfg,
+                sys_p,
+                user,
+                temperature=temp,
+                prefer_fast=prefer_fast,
+                max_tokens=mt,
+                tools=bool(needs_facts),
+            )
         out = _clean_comment_text(raw, max_len)
-        # отсечь «пустые» отписки модели
         bad_markers = (
             "кинь мысль",
             "чуть яснее",
             "нормальный разговор",
             "напиши мысль яснее",
             "продолжим как нормальный",
+            "чем могу помочь",
+            "отличный вопрос",
+            "спасибо за комментарий",
+            "спасибо за коммент",
+            "слышу",
+            "уточни одну деталь",
+            "давай разберём",
+            "без воды",
+            "напиши яснее",
+            "на связи. что",
         )
         low_out = (out or "").lower()
-        if out and len(out.strip()) >= 8 and not any(m in low_out for m in bad_markers):
+        weak = (not out) or len(out.strip()) < 8 or any(m in low_out for m in bad_markers)
+        if out and not weak:
             print(f"comment llm ok engine={eng} len={len(out)}", flush=True)
             return out
         if out:
             print(f"comment llm weak engine={eng}: {out[:80]!r}", flush=True)
+        # всегда retry на полном мозге, если отписка/заглушка
+        if weak and grok_ok(cfg):
+            raw2 = grok_chat(
+                cfg,
+                SYSTEM_COMMENT,
+                user
+                + "\nЗАПРЕТ: не пиши «Слышу», «уточни», «кинь яснее», «давай разберём».\n"
+                "Дай конкретный ответ по смыслу сообщения. Если вопрос — ответь. "
+                "Если привет — поздоровайся по-человечески и спроси тему.\n",
+                model=cfg.get("grok_full_model") or cfg.get("grok_model") or "grok-4.5",
+                temperature=0.5,
+                tools=bool(needs_facts),
+                max_tokens=360,
+            )
+            out2 = _clean_comment_text(raw2, max_len)
+            low2 = (out2 or "").lower()
+            if (
+                out2
+                and len(out2) >= 8
+                and not any(m in low2 for m in bad_markers)
+            ):
+                print(f"comment retry ok len={len(out2)}", flush=True)
+                return out2
     except Exception as e:
         print("comment llm fail", type(e).__name__, str(e)[:160], flush=True)
 
-    # fallback без LLM — умнее шаблонов (облако часто без Grok)
     print("comment fallback (no LLM)", flush=True)
     return _comment_fallback(comment_text, post_context=post_context, username=username)
 
@@ -1210,17 +1461,20 @@ def _comment_fallback(
             f"{hi}база: chatgpt.com · claude.ai · grok.x.ai · gemini.google.com · "
             "perplexity.ai — что именно нужно?"
         )
+    if any(w in low for w in ("как дела", "как ты", "как сам", "как жизнь", "how are you")):
+        return f"{hi}нормально 🔥 кручу канал и стек. Ты как — что сейчас в приоритете?"
     if any(w in low for w in ("привет", "здаров", "здарова", "хай", "ку ", "hello", "йо ")):
         return f"{hi}йо 🔥 на связи. Пиши по делу или в тему поста — разберём."
-    if any(w in low for w in ("крут", "огонь", "топ", "класс", "люблю", "огонь", "👍", "🔥")):
+    if any(w in low for w in ("крут", "огонь", "топ", "класс", "люблю", "👍", "🔥")):
         return f"{hi}зашло 🔥 а сам чем из стека чаще всего пользуешься?"
-    # спорт / чм — частые короткие вопросы
+    # спорт / чм
     if any(w in low for w in ("финал", "чм", "чемпионат мира", "world cup", "месси", "аргентин")):
         return (
-            f"{hi}по ЧМ: финал обычно в середине июля в год турнира "
-            "(дата плавает — глянь fifa.com / sports). "
-            "За кого болеешь — Месси/Аргентина или свой вариант?"
+            f"{hi}если про футбол ЧМ — дату лучше сверить на fifa.com/sports (год от года плывёт). "
+            "За кого болеешь — Аргентина/Месси или свой вариант?"
         )
+    if any(w in low for w in ("точк", "•••", "...", "мат ", "бан")):
+        return f"{hi}ага, точки вместо мата — чтобы не словить бан. Норм тактика 😄"
     if "?" in t or any(
         w in low for w in ("как ", "что ", "почему", "зачем", "какой", "можно ли", "когда ")
     ):
@@ -1228,20 +1482,17 @@ def _comment_fallback(
         if len(clip) > 90:
             clip = clip[:87] + "…"
         return (
-            f"{hi}по «{clip}» — коротко: зависит от деталей. "
-            "Кинь цель (что нужно получить) — разложу по шагам."
+            f"{hi}по «{clip}»: без Grok сейчас отвечу коротко — кинь цель "
+            "(что нужно на выходе), разложу по шагам."
         )
     clip = t.replace("\n", " ").strip()
     if len(clip) > 70:
         clip = clip[:67] + "…"
     if clip:
-        return (
-            f"{hi}понял: «{clip}». "
-            "Согласен с постом / свой опыт / вопрос — что из трёх?"
-        )
+        return f"{hi}понял: «{clip}». Согласен / свой опыт / вопрос — что из трёх?"
     if post_context:
         return f"{hi}интересный угол. А ты с постом согласен или есть другой взгляд?"
-    return f"{hi}на связи. Кинь вопрос или мысль по теме — отвечу по делу."
+    return f"{hi}кинь вопрос или мысль по теме — отвечу по делу."
 
 
 def rewrite_post(text: str, *, note: str = "") -> str:

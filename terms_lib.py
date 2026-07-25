@@ -305,26 +305,39 @@ def full_keyboard(*, accepted: bool = False) -> dict:
     return {"inline_keyboard": rows}
 
 
-def after_accept_keyboard() -> dict:
-    """Меню клиента — как у топ-ботов: 1 главный CTA, потом вторичка."""
-    return {
-        "inline_keyboard": [
-            [{"text": "🛠 Заказать", "callback_data": "ord:restart"}],
+def after_accept_keyboard(user_id: int | None = None) -> dict:
+    """Меню клиента — крупный CTA, всё под рукой."""
+    rows = [[{"text": "🛠  Заказать", "callback_data": "ord:restart"}]]
+    if user_id:
+        try:
+            import orders_lib as _o
+
+            pend = _o.user_pending_order(int(user_id))
+            if pend:
+                oid = str(pend.get("id") or "")
+                rows.append(
+                    [{"text": "📂  Мой заказ", "callback_data": f"ord:status:{oid}"}]
+                )
+        except Exception:
+            pass
+    rows.extend(
+        [
             [
-                {"text": "📦 Мои заказы", "callback_data": "ord:mine"},
-                {"text": "💳 Баланс", "callback_data": "bal:show"},
+                {"text": "📦  Заказы", "callback_data": "ord:mine"},
+                {"text": "💳  Баланс", "callback_data": "bal:show"},
             ],
             [
-                {"text": "💰 Прайс", "callback_data": "legal:prices"},
-                {"text": "🆘 Поддержка", "callback_data": "sup:home"},
+                {"text": "💰  Прайс", "callback_data": "legal:prices"},
+                {"text": "🆘  Поддержка", "callback_data": "sup:home"},
             ],
             [
-                {"text": "📋 Документы", "callback_data": "legal:hub"},
-                {"text": "📢 Канал", "url": "https://t.me/Vaggo01"},
+                {"text": "📢  Канал", "url": "https://t.me/Vaggo01"},
+                {"text": "🔗  Реферал", "callback_data": "ref:me"},
             ],
-            [{"text": "🎁 Розыгрыш в канале", "url": "https://t.me/Vaggo01"}],
+            [{"text": "🔄  Обновить меню", "callback_data": "menu:userhome"}],
         ]
-    }
+    )
+    return {"inline_keyboard": rows}
 
 
 def legal_menu_keyboard() -> dict:
@@ -436,9 +449,32 @@ def legal_hub_html(cfg: dict | None = None) -> str:
     )
 
 
-def user_home_html() -> str:
-    # прогресс розыгрыша, если есть (как «живой» статус у сильных ботов)
-    gw_line = ""
+def user_home_html(user_id: int | None = None) -> str:
+    lines = [
+        "✦  <b>Director Vaggo</b>",
+        "бот · сайт · скрипт · дизайн",
+        "─" * 16,
+    ]
+    if user_id:
+        try:
+            import orders_lib as _o
+
+            pend = _o.user_pending_order(int(user_id))
+            if pend:
+                st = _o.status_label(str(pend.get("status") or ""))
+                lines.append(
+                    f"\n🛠  Заказ  <code>{pend.get('id')}</code>\n     {st}"
+                )
+        except Exception:
+            pass
+        try:
+            import balance_lib as _b
+
+            bal = _b.get_balance(int(user_id))
+            if bal:
+                lines.append(f"💳  Баланс:  <b>{bal}</b> ₽")
+        except Exception:
+            pass
     try:
         import giveaway_lib as _gw
 
@@ -448,17 +484,12 @@ def user_home_html() -> str:
             need = _gw.min_complete_needed(act) or 10
             mid = act.get("channel_message_id")
             link = f"https://t.me/Vaggo01/{mid}" if mid else "https://t.me/Vaggo01"
-            gw_line = (
-                f"\n🎁 <b>Розыгрыш</b> · в барабане <b>{n}/{need}</b>\n"
-                f"<a href=\"{link}\">Открыть пост → Участвовать</a>\n"
+            lines.append(
+                f"🎁  Розыгрыш  <b>{n}/{need}</b>  ·  "
+                f"<a href=\"{link}\">пост</a>"
             )
     except Exception:
         pass
-    return (
-        "✨ <b>Director Vaggo</b>\n"
-        f"{'━' * 16}\n\n"
-        "Делаем под ключ: <b>бот · сайт · скрипт · дизайн</b>\n"
-        "Фикс-прайс · короткие ответы · Grok соберёт ТЗ\n"
-        f"{gw_line}\n"
-        "Выбери действие 👇"
-    )
+    lines.append("\nВыбери действие  👇")
+    lines.append("<i>Меню пропало — /menu</i>")
+    return "\n".join(lines)

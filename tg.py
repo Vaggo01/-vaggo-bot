@@ -58,6 +58,7 @@ def send_message(
     reply_to: int | None = None,
     disable_preview: bool = False,
     message_thread_id: int | None = None,
+    allow_without_reply: bool = True,
 ) -> dict:
     data: dict[str, Any] = {
         "chat_id": chat_id,
@@ -69,8 +70,9 @@ def send_message(
     if reply_markup:
         data["reply_markup"] = json.dumps(reply_markup)
     if reply_to is not None:
-        data["reply_to_message_id"] = reply_to
-        data["allow_sending_without_reply"] = "true"
+        data["reply_to_message_id"] = int(reply_to)
+        # false = строго reply; иначе Telegram кидает «просто в чат» (комменты отваливаются)
+        data["allow_sending_without_reply"] = "true" if allow_without_reply else "false"
     if message_thread_id is not None:
         data["message_thread_id"] = int(message_thread_id)
     return api(cfg, "sendMessage", data=data)
@@ -340,13 +342,22 @@ def get_chat_administrators(cfg: dict, chat_id: int | str) -> list:
 
 
 def pin_chat_message(cfg: dict, chat_id: int | str, message_id: int, *, silent: bool = True) -> bool:
+    """Закрепить сообщение. В личке с ботом обычно ок; ошибки глотаем."""
     data = {
         "chat_id": chat_id,
-        "message_id": message_id,
+        "message_id": int(message_id),
         "disable_notification": "true" if silent else "false",
     }
-    api(cfg, "pinChatMessage", data=data)
-    return True
+    try:
+        api(cfg, "pinChatMessage", data=data)
+        return True
+    except Exception as e:
+        err = str(e).lower()
+        # already pinned / not modified — ок
+        if "already" in err or "not modified" in err:
+            return True
+        print("pin fail", str(e)[:120], flush=True)
+        return False
 
 
 def delete_message(cfg: dict, chat_id: int | str, message_id: int) -> bool:
@@ -363,6 +374,80 @@ def try_delete_message(cfg: dict, chat_id: int | str, message_id: int | None) ->
         return True
     except Exception:
         return False
+
+
+def _no_msg_permissions() -> dict:
+    """Полный mute / отстранение от переписки."""
+    return {
+        "can_send_messages": False,
+        "can_send_audios": False,
+        "can_send_documents": False,
+        "can_send_photos": False,
+        "can_send_videos": False,
+        "can_send_video_notes": False,
+        "can_send_voice_notes": False,
+        "can_send_polls": False,
+        "can_send_other_messages": False,
+        "can_add_web_page_previews": False,
+        "can_change_info": False,
+        "can_invite_users": False,
+        "can_pin_messages": False,
+        "can_manage_topics": False,
+    }
+
+
+def restrict_chat_member(
+    cfg: dict,
+    chat_id: int | str,
+    user_id: int,
+    *,
+    until_date: int = 0,
+    permissions: dict | None = None,
+) -> dict:
+    """Мут / временное отстранение (бот должен быть админом с can_restrict_members)."""
+    perms = permissions or _no_msg_permissions()
+    data: dict[str, Any] = {
+        "chat_id": chat_id,
+        "user_id": int(user_id),
+        "permissions": json.dumps(perms),
+    }
+    if until_date:
+        data["until_date"] = int(until_date)
+    return api(cfg, "restrictChatMember", data=data)
+
+
+def ban_chat_member(
+    cfg: dict,
+    chat_id: int | str,
+    user_id: int,
+    *,
+    until_date: int = 0,
+    revoke_messages: bool = False,
+) -> dict:
+    """Бан в группе/чате обсуждений."""
+    data: dict[str, Any] = {
+        "chat_id": chat_id,
+        "user_id": int(user_id),
+        "revoke_messages": "true" if revoke_messages else "false",
+    }
+    if until_date:
+        data["until_date"] = int(until_date)
+    return api(cfg, "banChatMember", data=data)
+
+
+def unban_chat_member(
+    cfg: dict,
+    chat_id: int | str,
+    user_id: int,
+    *,
+    only_if_banned: bool = True,
+) -> dict:
+    data = {
+        "chat_id": chat_id,
+        "user_id": int(user_id),
+        "only_if_banned": "true" if only_if_banned else "false",
+    }
+    return api(cfg, "unbanChatMember", data=data)
 
 
 # Базовые эмодзи реакций Telegram (не любые)
