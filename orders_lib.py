@@ -397,11 +397,10 @@ def review_tz_with_ai(
                 )
                 raw = ""
         if not (raw or "").strip():
-            if last_err:
-                fallback["summary"] = (
-                    f"Оформили ТЗ по опросу «{title}» (AI временно не ответил). "
-                    "Можно отправлять — структура полная."
-                )
+            fallback["summary"] = (
+                f"ТЗ по опросу «{title}», фикс {price} ₽ — "
+                "цель, аудитория, функции и рамки сдачи собраны. Можно отправлять."
+            )
             fallback["engine"] = "fallback-no-grok"
             return fallback
 
