@@ -300,10 +300,13 @@ def review_tz_with_ai(
     fallback = {
         "brief": polished,
         "summary": (
-            f"Оформили ТЗ по опросу: «{title}», фикс {price} ₽. "
-            "Grok offline — структурировали ответы без нейросети."
+            f"ТЗ по опросу: «{title}», фикс {price} ₽. "
+            "Структура: цель → аудитория → функции → срок → рамки сдачи."
         ),
-        "additions": "Стандартные рамки тарифа (README, без хостинга, если не оговорено).",
+        "additions": (
+            "Дефолты тарифа: исходники + README; хостинг/VPS/домен — отдельно, "
+            "если не оговорено."
+        ),
         "questions": [],
         "legal_ok": legal_ok,
         "legal_reason": legal_reason or ("ок" if legal_ok else "подозрение на запрещённое"),
@@ -396,8 +399,8 @@ def review_tz_with_ai(
         if not (raw or "").strip():
             if last_err:
                 fallback["summary"] = (
-                    f"Grok недоступен ({type(last_err).__name__}) — "
-                    "собрали структурированное ТЗ без AI."
+                    f"Оформили ТЗ по опросу «{title}» (AI временно не ответил). "
+                    "Можно отправлять — структура полная."
                 )
             fallback["engine"] = "fallback-no-grok"
             return fallback
@@ -405,7 +408,9 @@ def review_tz_with_ai(
         data = _extract_json_obj(raw)
         if not data:
             # не пихаем сырой JSON клиенту в «добавил от себя»
-            fallback["summary"] = "Grok ответил без JSON — оставили структурированное ТЗ."
+            fallback["summary"] = (
+                f"ТЗ по опросу «{title}» собрано. Можно отправлять."
+            )
             fallback["additions"] = ""
             fallback["engine"] = "fallback-parse"
             return fallback
@@ -497,7 +502,9 @@ def review_tz_with_ai(
         }
     except Exception as e:
         print("review_tz_with_ai fail", type(e).__name__, str(e)[:160], flush=True)
-        fallback["summary"] = f"AI недоступен ({type(e).__name__}) — сырое ТЗ."
+        fallback["summary"] = (
+            f"ТЗ по опросу «{title}», фикс {price} ₽ — можно отправлять."
+        )
         return fallback
 
 

@@ -78,7 +78,7 @@ except ImportError:  # pragma: no cover
 
 _last_queue_tick = 0.0
 # 4.6.8 — orders without Grok ok; hide similar to client; pay gate; balance seed
-BOT_CODE_VERSION = "4.6.11"
+BOT_CODE_VERSION = "4.7.0"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:
@@ -5398,13 +5398,14 @@ def _order_show_estimate(
             up = _clean_client_ai_text(str(rev.get("upsell") or ""))
             if up:
                 parts.append("💡 <b>Имеет смысл добавить:</b> " + html.escape(up[:280]))
-        eng = rev.get("engine") or ""
-        if eng and str(eng).startswith("fallback"):
-            parts.append(
-                "ℹ️ Grok offline (мост на ПК) — ТЗ собрано по твоим ответам, можно отправлять."
-            )
-        elif eng == "grok":
+        eng = str(rev.get("engine") or "")
+        if eng == "grok":
             parts.append("<i>✅ обработано Grok</i>")
+        elif eng in ("cloud", "groq", "gemini", "openrouter", "ai_bus"):
+            parts.append("<i>✅ обработано AI</i>")
+        elif eng.startswith("fallback"):
+            # клиенту не орём «offline» — ТЗ уже нормальное из опроса
+            parts.append("<i>ТЗ собрано по твоим ответам</i>")
         ai_block = "\n".join(parts) + "\n\n"
     warn_line = ""
     if str(rev.get("risk") or "") == "warn":

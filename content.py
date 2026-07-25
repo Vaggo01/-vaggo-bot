@@ -118,6 +118,171 @@ def _xai_key(cfg: dict) -> str:
     )
 
 
+def _cloud_llm_keys(cfg: dict) -> list[tuple[str, str, str]]:
+    """
+    Облачные LLM без домашнего ПК (Bothost 24/7).
+    [(provider, api_key, model), ...]
+    Env: GROQ_API_KEY | GEMINI_API_KEY | OPENROUTER_API_KEY | CLOUD_AI_KEY
+    """
+    out: list[tuple[str, str, str]] = []
+    groq = (
+        (cfg.get("groq_api_key") or "").strip()
+        or (os.environ.get("GROQ_API_KEY") or "").strip()
+    )
+    if groq:
+        out.append(
+            (
+                "groq",
+                groq,
+                (cfg.get("groq_model") or os.environ.get("GROQ_MODEL") or "llama-3.3-70b-versatile"),
+            )
+        )
+    gem = (
+        (cfg.get("gemini_api_key") or "").strip()
+        or (os.environ.get("GEMINI_API_KEY") or "").strip()
+        or (os.environ.get("GOOGLE_API_KEY") or "").strip()
+    )
+    if gem:
+        out.append(
+            (
+                "gemini",
+                gem,
+                (
+                    cfg.get("gemini_model")
+                    or os.environ.get("GEMINI_MODEL")
+                    or "gemini-2.0-flash"
+                ),
+            )
+        )
+    ovr = (
+        (cfg.get("openrouter_api_key") or "").strip()
+        or (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+        or (cfg.get("cloud_ai_key") or "").strip()
+        or (os.environ.get("CLOUD_AI_KEY") or "").strip()
+    )
+    if ovr:
+        out.append(
+            (
+                "openrouter",
+                ovr,
+                (
+                    cfg.get("openrouter_model")
+                    or os.environ.get("OPENROUTER_MODEL")
+                    or "meta-llama/llama-3.3-70b-instruct:free"
+                ),
+            )
+        )
+    return out
+
+
+def _cloud_llm_chat(
+    cfg: dict,
+    system: str,
+    user: str,
+    *,
+    temperature: float = 0.4,
+    max_tokens: int | None = 900,
+) -> tuple[str, str]:
+    """
+    Чат через бесплатные/дешёвые облака. Возвращает (text, provider).
+    """
+    keys = _cloud_llm_keys(cfg)
+    if not keys:
+        raise RuntimeError("no cloud llm key")
+    last_err: Exception | None = None
+    for provider, key, model in keys:
+        try:
+            if provider == "groq":
+                r = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "temperature": temperature,
+                        "max_tokens": int(max_tokens or 900),
+                        "messages": [
+                            {"role": "system", "content": system or ""},
+                            {"role": "user", "content": user or ""},
+                        ],
+                    },
+                    timeout=60,
+                )
+                if r.status_code >= 400:
+                    raise RuntimeError(f"groq {r.status_code}: {r.text[:160]}")
+                data = r.json() if r.content else {}
+                text = (
+                    ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
+                    or ""
+                ).strip()
+                if text:
+                    return text, "groq"
+            elif provider == "gemini":
+                url = (
+                    "https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{model}:generateContent?key={key}"
+                )
+                prompt = f"{system}\n\n---\n\n{user}" if system else user
+                r = requests.post(
+                    url,
+                    headers={"Content-Type": "application/json"},
+                    json={
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {
+                            "temperature": temperature,
+                            "maxOutputTokens": int(max_tokens or 900),
+                        },
+                    },
+                    timeout=60,
+                )
+                if r.status_code >= 400:
+                    raise RuntimeError(f"gemini {r.status_code}: {r.text[:160]}")
+                data = r.json() if r.content else {}
+                parts = (
+                    ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts")
+                    or []
+                )
+                text = "".join(str(p.get("text") or "") for p in parts).strip()
+                if text:
+                    return text, "gemini"
+            elif provider == "openrouter":
+                r = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://t.me/Vaggo01",
+                        "X-Title": "Director Vaggo",
+                    },
+                    json={
+                        "model": model,
+                        "temperature": temperature,
+                        "max_tokens": int(max_tokens or 900),
+                        "messages": [
+                            {"role": "system", "content": system or ""},
+                            {"role": "user", "content": user or ""},
+                        ],
+                    },
+                    timeout=90,
+                )
+                if r.status_code >= 400:
+                    raise RuntimeError(f"openrouter {r.status_code}: {r.text[:160]}")
+                data = r.json() if r.content else {}
+                text = (
+                    ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
+                    or ""
+                ).strip()
+                if text:
+                    return text, "openrouter"
+        except Exception as e:
+            last_err = e
+            print("cloud llm fail", provider, type(e).__name__, str(e)[:100], flush=True)
+            continue
+    raise RuntimeError(f"cloud llm fail: {last_err}")
+
+
 # Маяк URL моста (ПК пишет при старте туннеля).
 # raw.githubusercontent — впереди (меньше кэш, чем jsDelivr).
 _BRIDGE_DISCOVERY_URLS = (
@@ -538,15 +703,34 @@ def brain_status(
         else:
             active = "template"
 
+    # cloud free keys / bus — тоже «мозг жив» для статуса
+    cloud_keys = _cloud_llm_keys(cfg)
+    bus_ok = False
+    try:
+        from ai_bus_lib import bus_enabled
+
+        bus_ok = bus_enabled(cfg)
+    except Exception:
+        bus_ok = False
+    if not g and (cloud_keys or bus_ok):
+        # на облаке без живого bridge всё равно есть шанс AI
+        if active in ("none", "template"):
+            active = "grok"
+            g = True
+            gsrc = "cloud" if cloud_keys else "ai_bus"
+
     hint = ""
-    if active in ("none", "template") or not g:
+    if active in ("none", "template") or (not g and not cloud_keys and not bus_ok):
         if _is_cloud_host(cfg):
-            if not _bridge_url(cfg) and not _xai_key(cfg):
-                hint = "Bothost: задай XAI_API_KEY или GROK_BRIDGE_URL+SECRET"
+            if not _bridge_url(cfg) and not _xai_key(cfg) and not cloud_keys:
+                hint = (
+                    "Bothost: ai_worker на ПК (ntfy bus) ИЛИ "
+                    "GROQ_API_KEY / XAI_API_KEY / bridge"
+                )
             elif _bridge_url(cfg) and not _bridge_healthy(cfg):
-                hint = "bridge URL есть, но /health мёртв — включи ПК + tunnel"
+                hint = "bridge мёртв — нужен ai_worker.py на ПК (без туннеля)"
             else:
-                hint = "Grok offline — проверь ключ / bridge"
+                hint = "AI offline — worker / ключ"
         else:
             hint = "локально: grok login  или xai_api_key"
     sess = {}
@@ -632,7 +816,13 @@ def grok_chat(
     tools: bool | None = None,
     max_tokens: int | None = None,
 ) -> str:
-    """xAI: bridge (ПК Super) → Responses+tools → chat/completions."""
+    """
+    Цепочка мозга:
+      1) home bridge (cloudflared) — если жив
+      2) ai_bus (ntfy, ПК worker без туннеля) — Grok Super
+      3) xAI API key / local session
+      4) cloud free LLM (Groq / Gemini / OpenRouter)
+    """
     model = (
         model
         or cfg.get("grok_model")
@@ -640,7 +830,7 @@ def grok_chat(
         or "grok-4.5"
     )
     use_tools = _grok_tools_enabled(cfg, tools)
-    # 1) домашний мост (Bothost → твой ПК)
+    # 1) домашний HTTP-мост (Bothost → cloudflared → ПК)
     if _bridge_url(cfg):
         try:
             return _bridge_chat(
@@ -653,8 +843,31 @@ def grok_chat(
                 max_tokens=max_tokens,
             )
         except Exception as e:
-            print("bridge chat fail → fallback api/session", e, flush=True)
-            # fall through to api key / session (ignore dead bridge URL)
+            print("bridge chat fail → bus/api", e, flush=True)
+
+    # 2) обратный bus через ntfy (ПК сам забирает задачи — без туннеля)
+    try:
+        from ai_bus_lib import bus_chat, bus_enabled
+
+        if bus_enabled(cfg):
+            # heartbeat-check внутри bus_chat; без worker — сразу fallback
+            to = 35.0 if (max_tokens or 0) and int(max_tokens or 0) >= 600 else 28.0
+            text = bus_chat(
+                cfg,
+                system,
+                user,
+                model=model,
+                temperature=temperature,
+                tools=False,
+                max_tokens=max_tokens,
+                timeout=to,
+            )
+            if (text or "").strip():
+                print("brain source=ai_bus", flush=True)
+                return text.strip()
+    except Exception as e:
+        print("ai_bus chat fail → api/cloud", type(e).__name__, str(e)[:100], flush=True)
+
     token, source = _grok_bearer(cfg)
     if source == "bridge":
         # URL есть, но мост уже упал выше — пробуем ключ/сессию напрямую
@@ -673,12 +886,24 @@ def grok_chat(
             if sess:
                 token, source = sess, "session"
             else:
-                raise RuntimeError(
-                    f"Grok bridge недоступен и нет api_key/session: {_bridge_url(cfg)}"
-                )
+                token, source = "", ""
     if not token:
+        # 4) облачный free/cheap LLM (Bothost без ПК)
+        try:
+            text, prov = _cloud_llm_chat(
+                cfg,
+                system,
+                user,
+                temperature=temperature,
+                max_tokens=max_tokens or 900,
+            )
+            if text:
+                print(f"brain source=cloud:{prov}", flush=True)
+                return text
+        except Exception as e:
+            print("cloud llm last-resort fail", e, flush=True)
         raise RuntimeError(
-            "Нет доступа к Grok: grok login / XAI_API_KEY / GROK_BRIDGE_URL"
+            "Нет доступа к AI: ai_worker на ПК / XAI_API_KEY / GROQ_API_KEY / bridge"
         )
     base = (cfg.get("xai_base_url") or "https://api.x.ai/v1").rstrip("/")
     headers = {
