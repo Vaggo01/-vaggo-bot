@@ -78,7 +78,7 @@ except ImportError:  # pragma: no cover
 
 _last_queue_tick = 0.0
 # 4.6.8 — orders without Grok ok; hide similar to client; pay gate; balance seed
-BOT_CODE_VERSION = "4.6.8"
+BOT_CODE_VERSION = "4.6.9"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:

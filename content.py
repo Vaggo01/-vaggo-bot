@@ -118,13 +118,14 @@ def _xai_key(cfg: dict) -> str:
     )
 
 
-# Маяк URL моста (ПК пишет при старте туннеля). Several mirrors — raw.github кэширует.
+# Маяк URL моста (ПК пишет при старте туннеля).
+# raw.githubusercontent — впереди (меньше кэш, чем jsDelivr).
 _BRIDGE_DISCOVERY_URLS = (
-    "https://cdn.jsdelivr.net/gh/vladislavbondarev230-cloud/-vaggo-bot@main/bridge_endpoint.json",
     "https://raw.githubusercontent.com/vladislavbondarev230-cloud/%2Dvaggo-bot/main/bridge_endpoint.json",
+    "https://cdn.jsdelivr.net/gh/vladislavbondarev230-cloud/-vaggo-bot@main/bridge_endpoint.json",
     "https://cdn.jsdelivr.net/gh/vladislavbondarev230-cloud/-vaggo-bot@master/bridge_endpoint.json",
 )
-_bridge_discovery_cache: dict[str, Any] = {"t": 0.0, "url": ""}
+_bridge_discovery_cache: dict[str, Any] = {"t": 0.0, "url": "", "dead": set()}
 
 
 def _probe_bridge_url(url: str, *, secret: str = "", timeout: float = 4.0) -> bool:
@@ -152,19 +153,30 @@ def _probe_bridge_url(url: str, *, secret: str = "", timeout: float = 4.0) -> bo
 
 
 def _discover_bridge_url() -> str:
-    """Свежий URL с GitHub/jsDelivr (ПК пишет bridge_endpoint.json)."""
+    """Свежий URL с GitHub (ПК пишет bridge_endpoint.json). Только живые URL."""
     now = time.time()
-    if _bridge_discovery_cache["url"] and (now - float(_bridge_discovery_cache["t"])) < 30:
-        return str(_bridge_discovery_cache["url"] or "")
+    cached = str(_bridge_discovery_cache.get("url") or "")
+    if (
+        cached
+        and (now - float(_bridge_discovery_cache.get("t") or 0)) < 20
+        and cached not in (_bridge_discovery_cache.get("dead") or set())
+    ):
+        # re-probe cached periodically — иначе залипаем на 530
+        if _probe_bridge_url(cached, secret=_bridge_secret({}), timeout=3.0):
+            return cached
+        dead = _bridge_discovery_cache.setdefault("dead", set())
+        dead.add(cached)
+        _bridge_discovery_cache["url"] = ""
 
-    urls: list[str] = []
-    urls.extend(_BRIDGE_DISCOVERY_URLS)
-    # cache-bust: jsDelivr иногда держит старый endpoint
-    bust = str(int(now) // 60)
-    urls = [f"{u}?t={bust}" if "?" not in u else u for u in urls]
+    urls: list[str] = list(_BRIDGE_DISCOVERY_URLS)
+    # сильный cache-bust
+    bust = str(int(now))
+    urls = [f"{u}?t={bust}" if "?" not in u else f"{u}&t={bust}" for u in urls]
 
     import json as _json
 
+    dead = _bridge_discovery_cache.setdefault("dead", set())
+    candidates: list[str] = []
     for disc in urls:
         try:
             r = requests.get(
@@ -173,7 +185,7 @@ def _discover_bridge_url() -> str:
                 headers={
                     "Cache-Control": "no-cache",
                     "Pragma": "no-cache",
-                    "User-Agent": "VaggoBot-BridgeDiscovery/1.2",
+                    "User-Agent": "VaggoBot-BridgeDiscovery/1.3",
                     "Accept": "application/json,text/plain,*/*",
                 },
             )
@@ -182,43 +194,69 @@ def _discover_bridge_url() -> str:
                 continue
             text = r.content.decode("utf-8-sig", errors="replace")
             data = _json.loads(text) if text.strip() else {}
-            u = str((data or {}).get("url") or "").strip().rstrip("/")
-            if u.startswith("http") and "your-cloudflared" not in u and "XXXX" not in u:
-                _bridge_discovery_cache["url"] = u
-                _bridge_discovery_cache["t"] = now
-                print(f"bridge discovery ok: {u}", flush=True)
-                return u
-            if u:
+            u = str((data or {}).get("url") or "").strip().rstrip("/").lstrip("\ufeff")
+            if not u.startswith("http"):
+                continue
+            if "your-cloudflared" in u or "XXXX" in u or "example" in u:
                 print(f"bridge discovery skip placeholder: {u[:48]}", flush=True)
+                continue
+            if u in dead:
+                continue
+            candidates.append(u)
         except Exception as e:
             print("bridge discovery fail", disc[:40], e, flush=True)
-    return str(_bridge_discovery_cache["url"] or "")
+
+    for u in candidates:
+        if _probe_bridge_url(u, secret=_bridge_secret({}), timeout=4.0):
+            _bridge_discovery_cache["url"] = u
+            _bridge_discovery_cache["t"] = now
+            print(f"bridge discovery live: {u}", flush=True)
+            return u
+        dead.add(u)
+        print(f"bridge discovery dead skip: {u[:48]}", flush=True)
+
+    return ""
 
 
 def _bridge_url(cfg: dict) -> str:
     """
     URL моста на домашний ПК.
-    Env/config может быть СТАРЫМ (quick-tunnel меняет URL) — если /health мёртв,
-    берём свежий URL из GitHub discovery.
+    Никогда не возвращаем мёртвый URL (иначе Bothost всегда fallback на «сырое ТЗ»).
     """
-    # на самом мосту discovery/loop запрещён
-    if cfg.get("grok_bridge_disable") or (os.environ.get("GROK_BRIDGE_DISABLE") or "").strip() in (
+    # процесс grok_bridge.py — не ходим в себя
+    if (os.environ.get("VAGGO_IS_BRIDGE") or "").strip().lower() in (
         "1",
         "true",
         "yes",
+        "on",
     ):
         return ""
+
+    # явный disable (local-only) — но на Bothost (BOT_ID / cloud) игнорируем disable,
+    # иначе «сырое ТЗ» навсегда
+    cloudish = bool((os.environ.get("BOT_ID") or "").strip()) or str(
+        cfg.get("bot_host_mode") or ""
+    ).lower() in ("cloud", "bothost", "hosting", "remote")
+    env_dis = (os.environ.get("GROK_BRIDGE_DISABLE") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if not cloudish and (cfg.get("grok_bridge_disable") or env_dis):
+        return ""
+
     secret = _bridge_secret(cfg)
     direct = (
-        (cfg.get("grok_bridge_url") or "").strip().rstrip("/")
-        or (os.environ.get("GROK_BRIDGE_URL") or "").strip().rstrip("/")
+        (cfg.get("grok_bridge_url") or "").strip().rstrip("/").lstrip("\ufeff")
+        or (os.environ.get("GROK_BRIDGE_URL") or "").strip().rstrip("/").lstrip("\ufeff")
     )
+    if direct and _probe_bridge_url(direct, secret=secret):
+        return direct
     if direct:
-        # живой — ок; мёртвый — не залипаем, ищем новый
-        if _probe_bridge_url(direct, secret=secret):
-            return direct
         print(f"bridge direct dead, rediscover: {direct[:48]}", flush=True)
-        # сбросить кэш discovery
+        dead = _bridge_discovery_cache.setdefault("dead", set())
+        dead.add(direct)
         _bridge_discovery_cache["t"] = 0.0
         _bridge_discovery_cache["url"] = ""
 
@@ -227,9 +265,12 @@ def _bridge_url(cfg: dict) -> str:
         or (os.environ.get("GROK_BRIDGE_DISCOVERY") or "").strip()
     )
     if custom:
-        # one-shot custom first
         try:
-            r = requests.get(custom, timeout=8, headers={"Cache-Control": "no-cache"})
+            r = requests.get(
+                custom + (("&" if "?" in custom else "?") + f"t={int(time.time())}"),
+                timeout=8,
+                headers={"Cache-Control": "no-cache"},
+            )
             if r.ok and r.content:
                 import json as _json
 
@@ -241,10 +282,9 @@ def _bridge_url(cfg: dict) -> str:
             print("custom discovery fail", e, flush=True)
 
     found = _discover_bridge_url()
-    if found and _probe_bridge_url(found, secret=secret):
+    if found:
         return found
-    # даже без health (краткий DNS lag) — вернём discovered, chat сам ретрайнет
-    return found or direct or ""
+    return ""
 
 
 # секрет по умолчанию (тот же, что на домашнем мосту) — Bothost без env всё равно ходит
@@ -286,8 +326,10 @@ def _bridge_chat(
         body["tools"] = bool(tools)
     if max_tokens is not None:
         body["max_tokens"] = int(max_tokens)
-    # быстрый путь без tools — короткий timeout
-    to = 45 if tools is False else 200
+    # без tools быстрее; для ТЗ/заказов даём больше времени (мост+tunnel)
+    to = 90 if tools is False else 200
+    if max_tokens is not None and int(max_tokens) >= 600:
+        to = max(to, 120)
     resp = requests.post(
         f"{url}/chat",
         headers=headers,

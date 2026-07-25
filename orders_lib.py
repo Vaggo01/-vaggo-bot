@@ -193,22 +193,45 @@ def next_tz_step(step_id: str) -> dict[str, Any] | None:
 def build_brief_from_answers(kind: str, answers: dict) -> str:
     """Собрать ТЗ из ответов (короткий опрос 4 шага + Grok-дополнения)."""
     meta = ORDER_TYPES.get(kind) or ORDER_TYPES["other"]
+    title = str(meta.get("title") or kind)
+    what = (answers.get("what") or answers.get("goal") or "по типу услуги").strip()
+    audience = (answers.get("audience") or answers.get("for_who") or "на усмотрение").strip()
+    features = (
+        answers.get("features") or answers.get("platform") or "базовый набор"
+    ).strip()
+    deadline = (answers.get("deadline") or answers.get("extra") or "не горит").strip()
+    # структурированное ТЗ (не «сырой» dump ключей)
     lines = [
-        f"Тип: {meta.get('title') or kind}",
-        f"Что сделать: {(answers.get('what') or 'по типу услуги').strip()}",
-        f"Для кого: {(answers.get('audience') or 'на усмотрение').strip()}",
-        f"Важно: {(answers.get('features') or 'базовый набор').strip()}",
-        f"Срок: {(answers.get('deadline') or 'не горит').strip()}",
+        f"ТЗ: {title}",
+        "",
+        "1. Цель / что сделать",
+        what,
+        "",
+        "2. Для кого / контекст",
+        audience,
+        "",
+        "3. Функции / важные детали",
+        features,
+        "",
+        "4. Срок / приоритет",
+        deadline,
+        "",
+        "5. Рамки тарифа",
+        f"• Фикс-цена: {int(meta.get('price') or PRICE_MIN)} ₽",
+        f"• Входит: {meta.get('includes') or '—'}",
+        f"• Не входит: {meta.get('not_includes') or 'хостинг, домен, сторы, 24/7'}",
+        "",
+        "6. Результат сдачи",
+        "Исходники + краткий README по запуску (если применимо). Без хостинга, если не оговорено.",
     ]
-    # legacy keys if present
     if (answers.get("colors") or "").strip():
-        lines.append(f"Стиль: {answers.get('colors')}")
+        lines.extend(["", "Стиль / цвета:", str(answers.get("colors")).strip()])
     if (answers.get("example") or "").strip():
-        lines.append(f"Пример: {answers.get('example')}")
+        lines.extend(["", "Референс / пример:", str(answers.get("example")).strip()])
     if (answers.get("ai_clarify") or "").strip():
-        lines.append(f"Уточнения: {(answers.get('ai_clarify') or '').strip()}")
+        lines.extend(["", "Уточнения клиента:", str(answers.get("ai_clarify")).strip()])
     if (answers.get("ai_notes") or "").strip():
-        lines.append(f"Grok: {(answers.get('ai_notes') or '').strip()}")
+        lines.extend(["", "Заметки AI:", str(answers.get("ai_notes")).strip()])
     return "\n".join(lines)
 
 
@@ -270,10 +293,17 @@ def review_tz_with_ai(
     except Exception:
         pass
 
+    polished = build_brief_from_answers(kind, answers)
+    if (extra_client_note or "").strip():
+        polished += f"\n\nУточнения клиента:\n{extra_client_note.strip()}"
+
     fallback = {
-        "brief": raw_brief,
-        "summary": "Сводка по твоим ответам (без AI — мозг недоступен).",
-        "additions": "",
+        "brief": polished,
+        "summary": (
+            f"Оформили ТЗ по опросу: «{title}», фикс {price} ₽. "
+            "Grok offline — структурировали ответы без нейросети."
+        ),
+        "additions": "Стандартные рамки тарифа (README, без хостинга, если не оговорено).",
         "questions": [],
         "legal_ok": legal_ok,
         "legal_reason": legal_reason or ("ок" if legal_ok else "подозрение на запрещённое"),
@@ -322,7 +352,7 @@ def review_tz_with_ai(
         f"Фикс-цена: {price} ₽\n"
         f"Входит: {includes}\n"
         f"Не входит: {not_includes}\n\n"
-        f"Ответы опроса:\n{raw_brief}\n"
+        f"Ответы опроса / черновик ТЗ:\n{polished}\n"
     )
     if (extra_client_note or "").strip():
         user += f"\nДоп. ответ клиента на уточнения:\n{extra_client_note.strip()}\n"
@@ -331,18 +361,52 @@ def review_tz_with_ai(
         from content import grok_chat
 
         cfg = cfg or {}
-        raw = grok_chat(
-            cfg,
-            system,
-            user,
-            model=(cfg.get("grok_order_model") or cfg.get("grok_fast_model") or "grok-4.3"),
-            temperature=0.3,
-            tools=False,  # без search — быстрее, не жрёт лишний лимит
-            max_tokens=700,
+        model = (
+            cfg.get("grok_order_model")
+            or cfg.get("grok_full_model")
+            or cfg.get("grok_model")
+            or "grok-4.5"
         )
+        raw = ""
+        last_err: Exception | None = None
+        # 2 попытки: full → fast (мост иногда таймаутит)
+        for model_try in (model, cfg.get("grok_fast_model") or "grok-4.3"):
+            try:
+                raw = grok_chat(
+                    cfg,
+                    system,
+                    user,
+                    model=str(model_try),
+                    temperature=0.3,
+                    tools=False,
+                    max_tokens=900,
+                )
+                if (raw or "").strip():
+                    break
+            except Exception as e:
+                last_err = e
+                print(
+                    "review_tz grok try fail",
+                    model_try,
+                    type(e).__name__,
+                    str(e)[:120],
+                    flush=True,
+                )
+                raw = ""
+        if not (raw or "").strip():
+            if last_err:
+                fallback["summary"] = (
+                    f"Grok недоступен ({type(last_err).__name__}) — "
+                    "собрали структурированное ТЗ без AI."
+                )
+            fallback["engine"] = "fallback-no-grok"
+            return fallback
+
         data = _extract_json_obj(raw)
         if not data:
-            fallback["summary"] = "AI ответил без JSON — оставил сырое ТЗ."
+            # если JSON не распарсился, но текст есть — оставим polished + summary
+            fallback["summary"] = "Grok ответил без JSON — оставили структурированное ТЗ."
+            fallback["additions"] = (raw or "")[:400]
             fallback["engine"] = "fallback-parse"
             return fallback
 
