@@ -77,8 +77,8 @@ except ImportError:  # pragma: no cover
     print("WARN: chat_mod_lib missing — chat moderation disabled", flush=True)
 
 _last_queue_tick = 0.0
-# 4.6.6 — shared balance via home bridge; platega stub; /baladd @username
-BOT_CODE_VERSION = "4.6.6"
+# 4.6.7 — balance seed for Bothost + remote-first wallet; platega ready
+BOT_CODE_VERSION = "4.6.7"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:
@@ -8666,6 +8666,18 @@ def run() -> None:
             return
     except Exception as e:
         print("cloud-gate", e, flush=True)
+
+    # баланс: seed с GitHub (Bothost) + remote home-bridge если жив
+    try:
+        n = bal.apply_balance_seed(force=False)
+        print(f"balance seed wallets_updated={n}", flush=True)
+        print(
+            f"balance remote={bal._use_remote_balance()} "
+            f"ibramosta={bal.get_balance(8581306681)}",
+            flush=True,
+        )
+    except Exception as e:
+        print("balance boot", e, flush=True)
 
     # один bot.py — иначе Telegram 409 Conflict
     try:

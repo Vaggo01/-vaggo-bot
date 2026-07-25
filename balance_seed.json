@@ -1,0 +1,36 @@
+{
+  "wallets": {
+    "999001": {
+      "balance": 260,
+      "username": "test",
+      "name": "test"
+    },
+    "1": {
+      "balance": 0,
+      "username": "t",
+      "name": ""
+    },
+    "999002": {
+      "balance": 0,
+      "username": "night",
+      "name": "night"
+    },
+    "8581306681": {
+      "balance": 19400,
+      "username": "Ibramosta",
+      "name": "."
+    },
+    "285959360": {
+      "balance": 1800,
+      "username": "posutivkusna",
+      "name": "Ed"
+    },
+    "5260125686": {
+      "balance": 2000,
+      "username": "BognBow",
+      "name": "Given"
+    }
+  },
+  "updated_at": 1784982831,
+  "note": "sync for Bothost"
+}

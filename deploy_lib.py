@@ -55,6 +55,7 @@ INCLUDE_NAMES = {
     "bridge_endpoint.json",
     "README.md",
     "giveaway_restore.json",  # 3.0: участники розыгрыша (seed)
+    "balance_seed.json",  # кошельки для Bothost
 }
 SKIP_NAMES = {
     "config.json",  # секреты/локальные правки

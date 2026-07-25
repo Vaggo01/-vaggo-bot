@@ -20,7 +20,10 @@ from state import new_id
 
 ROOT = Path(__file__).resolve().parent
 BALANCE_PATH = ROOT / "media" / "balance.json"
+# синхронизация на Bothost без моста (подтягивается с GitHub)
+SEED_PATH = ROOT / "balance_seed.json"
 _LOCK = threading.Lock()
+_seed_applied = False
 
 # Суммы быстрого пополнения (₽)
 TOPUP_PRESETS = (100, 200, 300, 400, 500, 700, 1000, 2000)
@@ -160,30 +163,94 @@ def qr_path(cfg: dict) -> Path | None:
     return p if p.is_file() else None
 
 
+def apply_balance_seed(*, force: bool = False) -> int:
+    """
+    Подтянуть balance_seed.json (с GitHub) в локальный media/balance.json.
+    Если seed.balance > local — поднимаем (и точечно синхронизируем username).
+    Возвращает число обновлённых кошельков.
+    """
+    global _seed_applied
+    if _seed_applied and not force:
+        return 0
+    if not SEED_PATH.is_file():
+        _seed_applied = True
+        return 0
+    try:
+        seed = json.loads(SEED_PATH.read_text(encoding="utf-8"))
+    except Exception as e:
+        print("balance seed read fail", e, flush=True)
+        _seed_applied = True
+        return 0
+    wallets = seed.get("wallets") if isinstance(seed, dict) else None
+    if not isinstance(wallets, dict) or not wallets:
+        _seed_applied = True
+        return 0
+    data = load()
+    n = 0
+    for uid, sw in wallets.items():
+        if not isinstance(sw, dict):
+            continue
+        try:
+            seed_bal = int(sw.get("balance") or 0)
+        except Exception:
+            continue
+        w = _wallet(data, int(uid))
+        cur = int(w.get("balance") or 0)
+        # поднимаем, если seed выше; force — выставить ровно seed
+        if force or seed_bal > cur:
+            w["balance"] = seed_bal if force else max(cur, seed_bal)
+            if sw.get("username"):
+                w["username"] = str(sw.get("username") or "").lstrip("@")
+            if sw.get("name"):
+                w["name"] = str(sw.get("name") or "")
+            n += 1
+    if n:
+        save(data)
+        print(f"balance seed applied: {n} wallets", flush=True)
+    _seed_applied = True
+    return n
+
+
+def export_balance_seed() -> dict:
+    """Снимок кошельков для balance_seed.json (без ledger/topups)."""
+    data = load()
+    out = {"wallets": {}, "updated_at": int(time.time()), "note": "sync for Bothost"}
+    for uid, w in (data.get("wallets") or {}).items():
+        if not isinstance(w, dict):
+            continue
+        try:
+            b = int(w.get("balance") or 0)
+        except Exception:
+            b = 0
+        if b <= 0 and not w.get("username"):
+            continue
+        out["wallets"][str(uid)] = {
+            "balance": b,
+            "username": str(w.get("username") or ""),
+            "name": str(w.get("name") or ""),
+        }
+    return out
+
+
 def _use_remote_balance() -> bool:
     """
-    Cloud/Bothost → баланс на домашнем ПК через bridge.
-    На самом bridge (ПК) всегда локальный файл.
+    Если доступен home-bridge — баланс оттуда (единый кошелёк).
+    На самом bridge (ПК) BALANCE_LOCAL=1 → всегда файл.
     """
     if (os.environ.get("BALANCE_LOCAL") or "").strip() in ("1", "true", "yes"):
         return False
     if (os.environ.get("GROK_BRIDGE_DISABLE") or "").strip() in ("1", "true", "yes"):
-        return False
-    try:
-        from state import load_config
-
-        cfg = load_config() or {}
-    except Exception:
-        cfg = {}
-    mode = str(cfg.get("bot_host_mode") or "").lower()
-    cloud = mode in ("cloud", "bothost", "hosting", "remote") or bool(
-        (os.environ.get("BOT_ID") or "").strip()
-    )
-    if not cloud:
+        # на cloud-боте env может быть пуст; disable только явный
+        pass
+    # не ходим remote, если мы и есть bridge-процесс
+    if (os.environ.get("VAGGO_IS_BRIDGE") or "").strip() in ("1", "true", "yes"):
         return False
     try:
         from content import _bridge_url
+        from state import load_config
 
+        cfg = load_config() or {}
+        # на мосту conf может иметь url — probe убьёт; bridge ставит VAGGO_IS_BRIDGE
         return bool(_bridge_url(cfg))
     except Exception:
         return False
@@ -198,14 +265,17 @@ def _remote_call(path: str, payload: dict | None = None, *, method: str = "POST"
     url = (_bridge_url(cfg) or "").rstrip("/")
     if not url:
         raise RuntimeError("no bridge for remote balance")
-    headers = {"Content-Type": "application/json"}
+    # BOM safety
+    url = url.lstrip("\ufeff").strip().rstrip("/")
+    headers = {"Content-Type": "application/json", "User-Agent": "VaggoBalance/1"}
     sec = _bridge_secret(cfg)
     if sec:
         headers["X-Bridge-Secret"] = sec
+    full = f"{url}{path}" if path.startswith("/") else f"{url}/{path}"
     if method.upper() == "GET":
-        r = requests.get(f"{url}{path}", headers=headers, timeout=20)
+        r = requests.get(full, headers=headers, timeout=20)
     else:
-        r = requests.post(f"{url}{path}", headers=headers, json=payload or {}, timeout=25)
+        r = requests.post(full, headers=headers, json=payload or {}, timeout=25)
     if r.status_code >= 400:
         raise RuntimeError(f"remote balance {r.status_code}: {r.text[:200]}")
     data = r.json() if r.content else {}
@@ -214,15 +284,32 @@ def _remote_call(path: str, payload: dict | None = None, *, method: str = "POST"
     return data
 
 
+def _cache_remote_balance(user_id: int, balance: int, *, username: str = "", name: str = "") -> None:
+    """Кэш на Bothost-диске — если мост мигнёт, не сразу 0."""
+    try:
+        data = load()
+        w = _wallet(data, user_id)
+        w["balance"] = int(balance)
+        if username:
+            w["username"] = username.lstrip("@")
+        if name:
+            w["name"] = name
+        w["remote_cached_at"] = int(time.time())
+        save(data)
+    except Exception as e:
+        print("cache remote bal fail", e, flush=True)
+
+
 def get_balance(user_id: int) -> int:
+    apply_balance_seed()
     if _use_remote_balance():
         try:
             data = _remote_call(f"/balance?user_id={int(user_id)}", method="GET")
-            return int(data.get("balance") or 0)
+            bal = int(data.get("balance") or 0)
+            _cache_remote_balance(int(user_id), bal)
+            return bal
         except Exception as e:
-            print("remote get_balance fail", e, flush=True)
-            # не врём 0 молча — но UI ждёт int; 0 + лог
-            return 0
+            print("remote get_balance fail → local cache", e, flush=True)
     data = load()
     w = data["wallets"].get(str(int(user_id))) or {}
     return int(w.get("balance") or 0)
@@ -290,7 +377,9 @@ def credit(
                 "name": name,
             },
         )
-        return int(data.get("balance") or 0)
+        bal = int(data.get("balance") or 0)
+        _cache_remote_balance(int(user_id), bal, username=username, name=name)
+        return bal
     data = load()
     w = _wallet(data, user_id)
     if username:
@@ -339,7 +428,9 @@ def debit(
                     "ref": ref,
                 },
             )
-            return int(data.get("balance") or 0)
+            bal = int(data.get("balance") or 0)
+            _cache_remote_balance(int(user_id), bal)
+            return bal
         except RuntimeError as e:
             msg = str(e)
             if "Недостаточно" in msg or "insufficient" in msg.lower():
@@ -596,10 +687,18 @@ def list_ledger(user_id: int, limit: int = 12) -> list[dict]:
 def format_balance_card(user_id: int, cfg: dict | None = None) -> str:
     import html as H
 
+    apply_balance_seed()
+    remote = False
+    try:
+        remote = _use_remote_balance()
+    except Exception:
+        remote = False
     bal = get_balance(user_id)
+    src = "облако↔ПК" if remote else "локально"
     lines = [
         "💰 <b>Баланс</b>",
         f"Доступно: <b>{bal}</b> ₽",
+        f"<i>источник: {src}</i>",
         "",
     ]
     if cfg is not None and not topup_enabled(cfg):
