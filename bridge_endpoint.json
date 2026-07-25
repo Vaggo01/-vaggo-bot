@@ -1,6 +1,5 @@
-{
-  "url": "https://your-cloudflared-url.trycloudflare.com",
-  "note": "Bridge enabled + cloudflared tunnel",
-  "updated": "2026-07-24",
-  "status": "pending-tunnel"
+﻿{
+    "url":  "https://hidden-jill-fridge-applying.trycloudflare.com",
+    "note":  "auto-updated by home PC when tunnel starts",
+    "updated":  "2026-07-25T11:36:45.6504514Z"
 }
