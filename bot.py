@@ -78,7 +78,7 @@ except ImportError:  # pragma: no cover
 
 _last_queue_tick = 0.0
 # 4.6.8 — orders without Grok ok; hide similar to client; pay gate; balance seed
-BOT_CODE_VERSION = "4.6.10"
+BOT_CODE_VERSION = "4.6.11"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:
@@ -5361,8 +5361,17 @@ def _order_show_estimate(
             s = (s or "").strip()
             if not s:
                 return ""
-            # не показывать сырой JSON / dump полей
-            if s.startswith("{") or '"brief"' in s[:40] or s.startswith('"brief"'):
+            # не показывать сырой JSON / dump полей (как на скрине «Добавил от себя»)
+            low40 = s[:80].lower()
+            if (
+                s.startswith("{")
+                or s.startswith('"')
+                or '"brief"' in low40
+                or "'brief'" in low40
+                or low40.lstrip().startswith("brief")
+                or s.count("\\n") >= 3
+                or (s.count('"') >= 6 and ":" in s[:60])
+            ):
                 return ""
             if s.count("\\n") >= 2 and "\n" not in s[:100]:
                 s = s.replace("\\n", "\n")

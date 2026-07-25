@@ -414,6 +414,9 @@ def review_tz_with_ai(
         # если brief пришёл с литералами \n — развернём
         if "\\n" in brief and "\n" not in brief[:80]:
             brief = brief.replace("\\n", "\n")
+        # слишком короткое/мусорное brief от модели → структурированный fallback
+        if len(brief) < 120 or brief.strip().startswith("{") or '"brief"' in brief[:40]:
+            brief = polished
         questions = data.get("questions") or []
         if not isinstance(questions, list):
             questions = []
@@ -459,10 +462,24 @@ def review_tz_with_ai(
         dev_brief = str(data.get("dev_brief") or "").strip()[:1200]
         risk_delay = str(data.get("risk_delay") or "средний").lower()[:20]
         risk_scope = str(data.get("risk_scope") or "средний").lower()[:20]
+        additions_raw = str(data.get("additions") or "").strip()
+        # не отдаём клиенту сырой JSON (часто модель кладёт весь объект в additions)
+        if (
+            not additions_raw
+            or additions_raw.startswith("{")
+            or additions_raw.startswith('"')
+            or '"brief"' in additions_raw[:50]
+            or additions_raw.count("\\n") >= 3
+        ):
+            additions_raw = ""
+        else:
+            if "\\n" in additions_raw and "\n" not in additions_raw[:80]:
+                additions_raw = additions_raw.replace("\\n", "\n")
+            additions_raw = additions_raw[:800]
         return {
             "brief": brief[:4000],
             "summary": str(data.get("summary") or "")[:800],
-            "additions": str(data.get("additions") or "")[:800],
+            "additions": additions_raw,
             "questions": questions,
             "legal_ok": legal_ok_ai,
             "legal_reason": str(data.get("legal_reason") or ("ок" if legal_ok_ai else "запрещено"))[
