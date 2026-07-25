@@ -77,8 +77,8 @@ except ImportError:  # pragma: no cover
     print("WARN: chat_mod_lib missing — chat moderation disabled", flush=True)
 
 _last_queue_tick = 0.0
-# 4.6.7 — balance seed for Bothost + remote-first wallet; platega ready
-BOT_CODE_VERSION = "4.6.7"
+# 4.6.8 — orders without Grok ok; hide similar to client; pay gate; balance seed
+BOT_CODE_VERSION = "4.6.8"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:
@@ -5378,18 +5378,14 @@ def _order_show_estimate(
                 "💡 <b>Имеет смысл добавить:</b> "
                 + html.escape(str(rev["upsell"])[:280])
             )
-        # похожие проекты
-        try:
-            import growth_lib as growth
-
-            sim = growth.similar_orders_html(brief, kind=kind)
-            if sim:
-                parts.append(sim)
-        except Exception:
-            pass
+        # «похожие проекты» — только владельцу в /orders, клиенту не показываем
         eng = rev.get("engine") or ""
-        if eng:
-            parts.append(f"<i>engine: {html.escape(str(eng))}</i>")
+        if eng and str(eng).startswith("fallback"):
+            parts.append(
+                "ℹ️ Grok сейчас offline — оформили по твоим ответам без AI."
+            )
+        elif eng == "grok":
+            parts.append("<i>проверено Grok</i>")
         ai_block = "\n".join(parts) + "\n\n"
     warn_line = ""
     if str(rev.get("risk") or "") == "warn":
@@ -5397,6 +5393,8 @@ def _order_show_estimate(
             "⚠️ Есть оговорки по объёму/ясности — можно слать, "
             "но уточни детали в /support если что.\n\n"
         )
+    need = int(est["price"])
+    can_pay = cur_bal >= need
     body = (
         f"📋 <b>Подтверждение</b>\n\n"
         + ai_block
@@ -5409,17 +5407,36 @@ def _order_show_estimate(
         + (f"не входит: {ninc}\n" if ninc else "")
         + "\n"
         f"<b>Итоговое ТЗ:</b>\n{html.escape(brief[:1400])}\n\n"
-        "Всё верно? «Отправить» = заказ + списание с баланса."
+        + (
+            "Всё верно? «Отправить» = заказ + списание с баланса."
+            if can_pay
+            else "Сначала нужен баланс ≥ цены заказа — иначе «Отправить» не пройдёт."
+        )
     )
-    kb_rows = [
-        [
-            {"text": "✅ Всё верно · отправить", "callback_data": "ord:commit"},
-            {"text": "✏️ Заново", "callback_data": "ord:restart"},
-        ],
-    ]
-    if cur_bal < int(est["price"]) and bal.topup_enabled(cfg):
-        kb_rows.insert(0, [{"text": "💳 Пополнить", "callback_data": "bal:topup"}])
-    kb_rows.append([{"text": "❌ Отмена", "callback_data": "ord:cancel"}])
+    kb_rows: list = []
+    if can_pay:
+        kb_rows.append(
+            [
+                {"text": "✅ Всё верно · отправить", "callback_data": "ord:commit"},
+                {"text": "✏️ Заново", "callback_data": "ord:restart"},
+            ]
+        )
+    else:
+        if bal.topup_enabled(cfg):
+            kb_rows.append(
+                [{"text": "💳 Пополнить баланс", "callback_data": "bal:topup"}]
+            )
+        kb_rows.append(
+            [{"text": "💬 Написать в поддержку", "callback_data": "sup:new"}]
+        )
+        kb_rows.append(
+            [
+                {"text": "✏️ Заново", "callback_data": "ord:restart"},
+                {"text": "❌ Отмена", "callback_data": "ord:cancel"},
+            ]
+        )
+    if can_pay:
+        kb_rows.append([{"text": "❌ Отмена", "callback_data": "ord:cancel"}])
     ui_edit_or_send(
         cfg,
         chat_id,

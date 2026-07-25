@@ -24,6 +24,7 @@ BALANCE_PATH = ROOT / "media" / "balance.json"
 SEED_PATH = ROOT / "balance_seed.json"
 _LOCK = threading.Lock()
 _seed_applied = False
+_seed_mtime = 0.0
 
 # Суммы быстрого пополнения (₽)
 TOPUP_PRESETS = (100, 200, 300, 400, 500, 700, 1000, 2000)
@@ -169,14 +170,19 @@ def apply_balance_seed(*, force: bool = False) -> int:
     Если seed.balance > local — поднимаем (и точечно синхронизируем username).
     Возвращает число обновлённых кошельков.
     """
-    global _seed_applied
-    if _seed_applied and not force:
+    global _seed_applied, _seed_mtime
+    try:
+        mtime = SEED_PATH.stat().st_mtime if SEED_PATH.is_file() else 0.0
+    except Exception:
+        mtime = 0.0
+    if _seed_applied and not force and mtime <= _seed_mtime:
         return 0
     if not SEED_PATH.is_file():
         _seed_applied = True
         return 0
     try:
         seed = json.loads(SEED_PATH.read_text(encoding="utf-8"))
+        _seed_mtime = mtime
     except Exception as e:
         print("balance seed read fail", e, flush=True)
         _seed_applied = True
