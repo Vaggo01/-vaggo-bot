@@ -77,8 +77,8 @@ except ImportError:  # pragma: no cover
     print("WARN: chat_mod_lib missing — chat moderation disabled", flush=True)
 
 _last_queue_tick = 0.0
-# 4.6.5 — channel reactions: safe emoji fallback + react via discussion forward
-BOT_CODE_VERSION = "4.6.5"
+# 4.6.6 — shared balance via home bridge; platega stub; /baladd @username
+BOT_CODE_VERSION = "4.6.6"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:
@@ -4588,22 +4588,56 @@ def handle_balance_private(cfg: dict, state: dict, msg: dict) -> bool:
         return True
 
     if owner and cmd in ("/baladd", "/balset"):
-        # /baladd USER_ID 500 [коммент]
+        # /baladd USER_ID|@username 500 [коммент]
         parts = arg.split()
         if len(parts) < 2:
             tg.send_message(
                 cfg,
                 chat_id,
                 "Пример:\n<code>/baladd 123456789 500</code>\n"
-                "<code>/balset 123456789 0</code> — выставить баланс",
+                "<code>/baladd @Ibramosta 10000</code>\n"
+                "<code>/balset 123456789 0</code> — выставить баланс\n\n"
+                "Баланс общий: на Bothost идёт через мост на ПК.",
                 parse_mode="HTML",
             )
             return True
+        target_raw = parts[0].strip()
         try:
-            target = int(parts[0])
             amount = int(parts[1])
         except ValueError:
-            tg.send_message(cfg, chat_id, "user_id и сумма — числами")
+            tg.send_message(cfg, chat_id, "Сумма — числом")
+            return True
+        target = 0
+        try:
+            target = int(target_raw.lstrip("@"))
+        except ValueError:
+            target = 0
+        if not target:
+            un = target_raw.lstrip("@").lower()
+            # known wallets + giveaway entries
+            try:
+                data = bal.load()
+                for k, w in (data.get("wallets") or {}).items():
+                    if str(w.get("username") or "").lower() == un:
+                        target = int(k)
+                        break
+            except Exception:
+                pass
+            if not target:
+                try:
+                    act = gw.get_active()
+                    for e in (act.get("entries") or {}).values():
+                        if str(e.get("username") or "").lower() == un:
+                            target = int(e.get("user_id") or 0)
+                            break
+                except Exception:
+                    pass
+        if not target:
+            tg.send_message(
+                cfg,
+                chat_id,
+                "Не нашёл user_id. Укажи числом или @username из розыгрыша/кошелька.",
+            )
             return True
         note = " ".join(parts[2:])[:100] or "owner"
         if cmd == "/balset":

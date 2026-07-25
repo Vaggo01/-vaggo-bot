@@ -44,6 +44,7 @@ INCLUDE_NAMES = {
     "growth_lib.py",
     "chat_mod_lib.py",
     "docs_lib.py",
+    "platega_lib.py",
     "grok_auth.py",
     "imagine.py",
     "deploy_lib.py",

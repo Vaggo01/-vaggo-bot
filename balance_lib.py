@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-Баланс пользователей + пополнение через СБП.
+Баланс пользователей + пополнение через СБП / Platega.
 
-Хранение: media/balance.json (отдельно от state.json).
-СБП: пользователь переводит по реквизитам → «Я оплатил» → владелец подтверждает.
-Автозачисление без банка/агрегатора невозможно — только ручное confirm.
+Хранение: media/balance.json (на домашнем ПК — source of truth).
+На Bothost (cloud): чтение/запись через Grok-bridge /balance/* — один кошелёк везде.
+СБП: перевод → «Я оплатил» → confirm.
+Platega: webhook success → credit (см. platega_lib).
 """
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -158,7 +160,69 @@ def qr_path(cfg: dict) -> Path | None:
     return p if p.is_file() else None
 
 
+def _use_remote_balance() -> bool:
+    """
+    Cloud/Bothost → баланс на домашнем ПК через bridge.
+    На самом bridge (ПК) всегда локальный файл.
+    """
+    if (os.environ.get("BALANCE_LOCAL") or "").strip() in ("1", "true", "yes"):
+        return False
+    if (os.environ.get("GROK_BRIDGE_DISABLE") or "").strip() in ("1", "true", "yes"):
+        return False
+    try:
+        from state import load_config
+
+        cfg = load_config() or {}
+    except Exception:
+        cfg = {}
+    mode = str(cfg.get("bot_host_mode") or "").lower()
+    cloud = mode in ("cloud", "bothost", "hosting", "remote") or bool(
+        (os.environ.get("BOT_ID") or "").strip()
+    )
+    if not cloud:
+        return False
+    try:
+        from content import _bridge_url
+
+        return bool(_bridge_url(cfg))
+    except Exception:
+        return False
+
+
+def _remote_call(path: str, payload: dict | None = None, *, method: str = "POST") -> dict:
+    import requests
+    from content import _bridge_secret, _bridge_url
+    from state import load_config
+
+    cfg = load_config()
+    url = (_bridge_url(cfg) or "").rstrip("/")
+    if not url:
+        raise RuntimeError("no bridge for remote balance")
+    headers = {"Content-Type": "application/json"}
+    sec = _bridge_secret(cfg)
+    if sec:
+        headers["X-Bridge-Secret"] = sec
+    if method.upper() == "GET":
+        r = requests.get(f"{url}{path}", headers=headers, timeout=20)
+    else:
+        r = requests.post(f"{url}{path}", headers=headers, json=payload or {}, timeout=25)
+    if r.status_code >= 400:
+        raise RuntimeError(f"remote balance {r.status_code}: {r.text[:200]}")
+    data = r.json() if r.content else {}
+    if not data.get("ok"):
+        raise RuntimeError(str(data.get("error") or data)[:200])
+    return data
+
+
 def get_balance(user_id: int) -> int:
+    if _use_remote_balance():
+        try:
+            data = _remote_call(f"/balance?user_id={int(user_id)}", method="GET")
+            return int(data.get("balance") or 0)
+        except Exception as e:
+            print("remote get_balance fail", e, flush=True)
+            # не врём 0 молча — но UI ждёт int; 0 + лог
+            return 0
     data = load()
     w = data["wallets"].get(str(int(user_id))) or {}
     return int(w.get("balance") or 0)
@@ -213,6 +277,20 @@ def credit(
     amount = int(amount)
     if amount <= 0:
         raise ValueError("amount must be > 0")
+    if _use_remote_balance():
+        data = _remote_call(
+            "/balance/credit",
+            {
+                "user_id": int(user_id),
+                "amount": amount,
+                "kind": kind,
+                "note": note,
+                "ref": ref,
+                "username": username,
+                "name": name,
+            },
+        )
+        return int(data.get("balance") or 0)
     data = load()
     w = _wallet(data, user_id)
     if username:
@@ -249,6 +327,24 @@ def debit(
     amount = int(amount)
     if amount <= 0:
         raise ValueError("amount must be > 0")
+    if _use_remote_balance():
+        try:
+            data = _remote_call(
+                "/balance/debit",
+                {
+                    "user_id": int(user_id),
+                    "amount": amount,
+                    "kind": kind,
+                    "note": note,
+                    "ref": ref,
+                },
+            )
+            return int(data.get("balance") or 0)
+        except RuntimeError as e:
+            msg = str(e)
+            if "Недостаточно" in msg or "insufficient" in msg.lower():
+                raise ValueError(msg)
+            raise ValueError(msg)
     data = load()
     w = _wallet(data, user_id)
     bal = int(w.get("balance") or 0)
