@@ -404,13 +404,16 @@ def review_tz_with_ai(
 
         data = _extract_json_obj(raw)
         if not data:
-            # если JSON не распарсился, но текст есть — оставим polished + summary
+            # не пихаем сырой JSON клиенту в «добавил от себя»
             fallback["summary"] = "Grok ответил без JSON — оставили структурированное ТЗ."
-            fallback["additions"] = (raw or "")[:400]
+            fallback["additions"] = ""
             fallback["engine"] = "fallback-parse"
             return fallback
 
-        brief = str(data.get("brief") or raw_brief).strip() or raw_brief
+        brief = str(data.get("brief") or polished or raw_brief).strip() or polished
+        # если brief пришёл с литералами \n — развернём
+        if "\\n" in brief and "\n" not in brief[:80]:
+            brief = brief.replace("\\n", "\n")
         questions = data.get("questions") or []
         if not isinstance(questions, list):
             questions = []

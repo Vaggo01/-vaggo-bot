@@ -78,7 +78,7 @@ except ImportError:  # pragma: no cover
 
 _last_queue_tick = 0.0
 # 4.6.8 — orders without Grok ok; hide similar to client; pay gate; balance seed
-BOT_CODE_VERSION = "4.6.9"
+BOT_CODE_VERSION = "4.6.10"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:
@@ -5356,13 +5356,25 @@ def _order_show_estimate(
         parts = [f"🧠 <b>Проверка ТЗ</b> {risk_h}"]
         if rev.get("summary"):
             parts.append(html.escape(str(rev["summary"])[:500]))
-        if rev.get("additions"):
-            parts.append(
-                "<b>Добавил от себя:</b> " + html.escape(str(rev["additions"])[:400])
-            )
+
+        def _clean_client_ai_text(s: str) -> str:
+            s = (s or "").strip()
+            if not s:
+                return ""
+            # не показывать сырой JSON / dump полей
+            if s.startswith("{") or '"brief"' in s[:40] or s.startswith('"brief"'):
+                return ""
+            if s.count("\\n") >= 2 and "\n" not in s[:100]:
+                s = s.replace("\\n", "\n")
+            return s[:400]
+
+        add = _clean_client_ai_text(str(rev.get("additions") or ""))
+        if add:
+            parts.append("<b>Добавил от себя:</b> " + html.escape(add))
         if rev.get("feasible_reason"):
             parts.append(
-                "<b>Выполнимость:</b> " + html.escape(str(rev["feasible_reason"])[:300])
+                "<b>Выполнимость:</b> "
+                + html.escape(str(rev["feasible_reason"])[:300])
             )
         if rev.get("legal_reason") and risk != "ok":
             parts.append(
@@ -5374,18 +5386,16 @@ def _order_show_estimate(
                 f"объём <b>{html.escape(str(rev.get('risk_scope') or '—'))}</b>"
             )
         if rev.get("upsell"):
-            parts.append(
-                "💡 <b>Имеет смысл добавить:</b> "
-                + html.escape(str(rev["upsell"])[:280])
-            )
-        # «похожие проекты» — только владельцу в /orders, клиенту не показываем
+            up = _clean_client_ai_text(str(rev.get("upsell") or ""))
+            if up:
+                parts.append("💡 <b>Имеет смысл добавить:</b> " + html.escape(up[:280]))
         eng = rev.get("engine") or ""
         if eng and str(eng).startswith("fallback"):
             parts.append(
-                "ℹ️ Grok сейчас offline — оформили по твоим ответам без AI."
+                "ℹ️ Grok offline (мост на ПК) — ТЗ собрано по твоим ответам, можно отправлять."
             )
         elif eng == "grok":
-            parts.append("<i>проверено Grok</i>")
+            parts.append("<i>✅ обработано Grok</i>")
         ai_block = "\n".join(parts) + "\n\n"
     warn_line = ""
     if str(rev.get("risk") or "") == "warn":
