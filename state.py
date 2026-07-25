@@ -193,11 +193,18 @@ def load_config() -> dict:
         if k not in cfg or cfg.get(k) is None:
             cfg[k] = default
 
-    # secret для bridge — дефолт только если пусто (Bothost env перекрывает)
+    # secret для bridge — env → config → дефолт (совпадает с home bridge)
     if not (cfg.get("grok_bridge_secret") or "").strip():
         env_sec = (os.environ.get("GROK_BRIDGE_SECRET") or "").strip()
         if env_sec:
             cfg["grok_bridge_secret"] = env_sec
+        else:
+            cfg["grok_bridge_secret"] = "ftW0PH-ZJQOaeXvFuL2mu0lEFIPsremU"
+
+    # cloud: если URL моста пуст — Bothost сам подхватит через discovery GitHub
+    if str(cfg.get("bot_host_mode") or "").lower() in ("cloud", "bothost", "hosting"):
+        if cfg.get("grok_bridge_disable") is None:
+            cfg["grok_bridge_disable"] = False
 
     if not (cfg.get("bot_token") or "").strip():
         raise FileNotFoundError(

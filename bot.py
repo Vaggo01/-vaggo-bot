@@ -77,8 +77,8 @@ except ImportError:  # pragma: no cover
     print("WARN: chat_mod_lib missing — chat moderation disabled", flush=True)
 
 _last_queue_tick = 0.0
-# 4.6.3 — Bothost: default discussion_group + channel AI flags; bridge for Grok
-BOT_CODE_VERSION = "4.6.3"
+# 4.6.4 — auto bridge rediscover if URL dead; default secret; channel AI on Bothost
+BOT_CODE_VERSION = "4.6.4"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:
