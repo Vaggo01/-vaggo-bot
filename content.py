@@ -815,6 +815,7 @@ def grok_chat(
     temperature: float = 0.55,
     tools: bool | None = None,
     max_tokens: int | None = None,
+    skip_bus: bool = False,
 ) -> str:
     """
     Цепочка мозга:
@@ -822,6 +823,8 @@ def grok_chat(
       2) ai_bus (ntfy, ПК worker без туннеля) — Grok Super
       3) xAI API key / local session
       4) cloud free LLM (Groq / Gemini / OpenRouter)
+
+    skip_bus=True — для комментов: ntfy часто тупит/блокируется, не ждём.
     """
     model = (
         model
@@ -846,27 +849,29 @@ def grok_chat(
             print("bridge chat fail → bus/api", e, flush=True)
 
     # 2) обратный bus через ntfy (ПК сам забирает задачи — без туннеля)
-    try:
-        from ai_bus_lib import bus_chat, bus_enabled
+    # комменты: skip — иначе 6–40с таймаут на мёртвый ntfy
+    if not skip_bus:
+        try:
+            from ai_bus_lib import bus_chat, bus_enabled
 
-        if bus_enabled(cfg):
-            # heartbeat-check внутри bus_chat; без worker — сразу fallback
-            to = 35.0 if (max_tokens or 0) and int(max_tokens or 0) >= 600 else 28.0
-            text = bus_chat(
-                cfg,
-                system,
-                user,
-                model=model,
-                temperature=temperature,
-                tools=False,
-                max_tokens=max_tokens,
-                timeout=to,
-            )
-            if (text or "").strip():
-                print("brain source=ai_bus", flush=True)
-                return text.strip()
-    except Exception as e:
-        print("ai_bus chat fail → api/cloud", type(e).__name__, str(e)[:100], flush=True)
+            if bus_enabled(cfg):
+                # heartbeat-check внутри bus_chat; без worker — сразу fallback
+                to = 35.0 if (max_tokens or 0) and int(max_tokens or 0) >= 600 else 28.0
+                text = bus_chat(
+                    cfg,
+                    system,
+                    user,
+                    model=model,
+                    temperature=temperature,
+                    tools=False,
+                    max_tokens=max_tokens,
+                    timeout=to,
+                )
+                if (text or "").strip():
+                    print("brain source=ai_bus", flush=True)
+                    return text.strip()
+        except Exception as e:
+            print("ai_bus chat fail → api/cloud", type(e).__name__, str(e)[:100], flush=True)
 
     token, source = _grok_bearer(cfg)
     if source == "bridge":
@@ -1607,6 +1612,35 @@ SYSTEM_COMMENT_FAST = SYSTEM_BRAIN + """
 Тема любая, не отшивай. Без HTML/markdown **. Только текст реплики."""
 
 
+_COMMENT_BAD_MARKERS = (
+    "кинь мысль",
+    "чуть яснее",
+    "нормальный разговор",
+    "напиши мысль яснее",
+    "продолжим как нормальный",
+    "чем могу помочь",
+    "отличный вопрос",
+    "спасибо за комментарий",
+    "спасибо за коммент",
+    "слышу",
+    "уточни одну деталь",
+    "давай разберём",
+    "напиши яснее",
+    "на связи. что",
+    "кинь цель",
+    "без grok сейчас",
+    "уточни",
+)
+
+
+def _comment_is_weak(text: str) -> bool:
+    t = (text or "").strip()
+    if len(t) < 10:
+        return True
+    low = t.lower()
+    return any(m in low for m in _COMMENT_BAD_MARKERS)
+
+
 def generate_comment_reply(
     comment_text: str,
     *,
@@ -1615,7 +1649,7 @@ def generate_comment_reply(
 ) -> str:
     """
     Умный ответ подписчику.
-    trivial → instant; факты → full + search; остальное → full model, без тупых заглушек.
+    instant → LLM (fast, без tools) → retry → живой fallback (НИКОГДА «Слышу»).
     """
     cfg = load_config()
     # 0) instant только для пустяков
@@ -1626,120 +1660,120 @@ def generate_comment_reply(
             return inst
 
     free = bool(cfg.get("comment_free_chat", True))
-    # полный ответ даже на оффтоп (рецепт, спорт…) — не режем в 3 фразы
     max_len = int(cfg.get("comment_max_chars") or (1200 if free else 700))
     temp = float(cfg.get("comment_temperature") or 0.62)
-    # search: по умолчанию ВКЛ для факт-вопросов (можно вырубить comment_search=false)
     allow_search = cfg.get("comment_search", True)
     if cfg.get("comment_always_search"):
         allow_search = True
     needs_facts = bool(allow_search) and _comment_needs_live_facts(comment_text)
-    trivial = _comment_is_trivial(comment_text)
-    # умный путь по умолчанию; fast только если comment_prefer_fast и trivial
-    force_fast = bool(cfg.get("comment_prefer_fast", False)) and trivial and not needs_facts
-    prefer_fast = force_fast
+    # в комментах всегда сначала fast-модель без tools — быстрее и стабильнее на Bothost
+    # tools/search только если явно факт-вопрос и Grok жив
+    prefer_fast = True
+    if needs_facts and grok_ok(cfg) and not cfg.get("comment_prefer_fast", False):
+        prefer_fast = False
 
     user = (
         f"Собеседник: {username or 'человек'}\n"
         f"Написал: {(comment_text or '').strip()}\n"
-        "Ответь УМНО и ПОЛНО по его реплике — даже если тема не про канал/ИИ.\n"
-        "Смысл → нормальный ответ (шаги/рецепт/схема если просят) → (опц.) короткий вопрос.\n"
-        "Без заглушек, без «отличный вопрос», без «это не тема канала».\n"
+        "Ответь по делу, с характером Вагго. 2–6 предложений.\n"
+        "Если вопрос — ответь (можно честно «без точной даты — смотри …»).\n"
+        "Если мнение — своя позиция + вопрос.\n"
+        "ЗАПРЕЩЕНО: «Слышу», «уточни», «кинь яснее», «отличный вопрос», "
+        "«продолжим как нормальный разговор», «чем могу помочь».\n"
     )
     if needs_facts:
-        user += "Нужны свежие факты — используй live search, не выдумывай.\n"
+        user += "Факты: не выдумывай даты/цифры; если нет search — скажи где сверить.\n"
     if post_context:
-        user += f"Фон поста (не пересказывай, якорь если уместно):\n{post_context[:700]}\n"
-    try:
-        print(
-            f"comment path fast={prefer_fast} facts={needs_facts} "
-            f"text={(comment_text or '')[:40]!r}",
-            flush=True,
-        )
-        sys_p = SYSTEM_COMMENT_FAST if prefer_fast else SYSTEM_COMMENT
-        # полный мозг для нормальных комментов
-        mt = int(
-            cfg.get("comment_max_tokens")
-            or (200 if prefer_fast else (700 if needs_facts else 550))
-        )
-        if not prefer_fast and grok_ok(cfg):
-            model = (
-                cfg.get("grok_full_model")
-                or cfg.get("grok_model")
-                or "grok-4.5"
-            )
-            raw = grok_chat(
-                cfg,
-                sys_p,
-                user,
-                model=model,
-                temperature=temp,
-                tools=bool(needs_facts or cfg.get("comment_always_search")),
-                max_tokens=mt,
-            )
-            eng = "grok"
-        else:
-            raw, eng = llm_chat(
-                cfg,
-                sys_p,
-                user,
-                temperature=temp,
-                prefer_fast=prefer_fast,
-                max_tokens=mt,
-                tools=bool(needs_facts),
-            )
-        out = _clean_comment_text(raw, max_len)
-        bad_markers = (
-            "кинь мысль",
-            "чуть яснее",
-            "нормальный разговор",
-            "напиши мысль яснее",
-            "продолжим как нормальный",
-            "чем могу помочь",
-            "отличный вопрос",
-            "спасибо за комментарий",
-            "спасибо за коммент",
-            "слышу",
-            "уточни одну деталь",
-            "давай разберём",
-            "без воды",
-            "напиши яснее",
-            "на связи. что",
-        )
-        low_out = (out or "").lower()
-        weak = (not out) or len(out.strip()) < 8 or any(m in low_out for m in bad_markers)
-        if out and not weak:
-            print(f"comment llm ok engine={eng} len={len(out)}", flush=True)
-            return out
-        if out:
-            print(f"comment llm weak engine={eng}: {out[:80]!r}", flush=True)
-        # всегда retry на полном мозге, если отписка/заглушка
-        if weak and grok_ok(cfg):
-            raw2 = grok_chat(
-                cfg,
-                SYSTEM_COMMENT,
-                user
-                + "\nЗАПРЕТ: не пиши «Слышу», «уточни», «кинь яснее», «давай разберём».\n"
-                "Дай конкретный ответ по смыслу сообщения. Если вопрос — ответь. "
-                "Если привет — поздоровайся по-человечески и спроси тему.\n",
-                model=cfg.get("grok_full_model") or cfg.get("grok_model") or "grok-4.5",
-                temperature=0.5,
-                tools=bool(needs_facts),
-                max_tokens=360,
-            )
-            out2 = _clean_comment_text(raw2, max_len)
-            low2 = (out2 or "").lower()
-            if (
-                out2
-                and len(out2) >= 8
-                and not any(m in low2 for m in bad_markers)
-            ):
-                print(f"comment retry ok len={len(out2)}", flush=True)
-                return out2
-    except Exception as e:
-        print("comment llm fail", type(e).__name__, str(e)[:160], flush=True)
+        user += f"Фон поста (якорь, не пересказ):\n{post_context[:500]}\n"
 
-    print("comment fallback (no LLM)", flush=True)
+    has_brain = bool(grok_ok(cfg) or _cloud_llm_keys(cfg) or ollama_ok(cfg, force=False))
+    if has_brain:
+        try:
+            print(
+                f"comment path fast={prefer_fast} facts={needs_facts} "
+                f"text={(comment_text or '')[:40]!r}",
+                flush=True,
+            )
+            sys_p = SYSTEM_COMMENT_FAST if prefer_fast else SYSTEM_COMMENT
+            mt = int(
+                cfg.get("comment_max_tokens")
+                or (280 if prefer_fast else (500 if needs_facts else 400))
+            )
+            # 1) fast, no tools — главный путь для комментов
+            model_fast = (
+                cfg.get("grok_fast_model")
+                or cfg.get("grok_model")
+                or "grok-4.3"
+            )
+            raw = ""
+            eng = "none"
+            try:
+                if grok_ok(cfg):
+                    raw = grok_chat(
+                        cfg,
+                        sys_p,
+                        user,
+                        model=model_fast,
+                        temperature=temp,
+                        tools=False,
+                        max_tokens=mt,
+                        skip_bus=True,
+                    )
+                    eng = "grok-fast"
+                else:
+                    raw, eng = llm_chat(
+                        cfg,
+                        sys_p,
+                        user,
+                        temperature=temp,
+                        prefer_fast=True,
+                        max_tokens=mt,
+                        tools=False,
+                    )
+            except Exception as e1:
+                print("comment pass1 fail", type(e1).__name__, str(e1)[:100], flush=True)
+                # cloud free path
+                try:
+                    raw, eng = _cloud_llm_chat(
+                        cfg, sys_p, user, temperature=temp, max_tokens=mt
+                    )
+                    eng = f"cloud:{eng}"
+                except Exception as e2:
+                    print("comment cloud fail", type(e2).__name__, str(e2)[:80], flush=True)
+                    raw = ""
+
+            out = _clean_comment_text(raw, max_len)
+            if out and not _comment_is_weak(out):
+                print(f"comment llm ok engine={eng} len={len(out)}", flush=True)
+                return out
+            if out:
+                print(f"comment llm weak engine={eng}: {out[:80]!r}", flush=True)
+
+            # 2) retry full, still no tools (tools часто таймаутят на cloud)
+            if grok_ok(cfg):
+                raw2 = grok_chat(
+                    cfg,
+                    SYSTEM_COMMENT,
+                    user
+                    + "\nОтветь КОНКРЕТНО по смыслу. Никаких заглушек.\n",
+                    model=cfg.get("grok_full_model")
+                    or cfg.get("grok_model")
+                    or "grok-4.5",
+                    temperature=0.45,
+                    tools=False,
+                    max_tokens=360,
+                    skip_bus=True,
+                )
+                out2 = _clean_comment_text(raw2, max_len)
+                if out2 and not _comment_is_weak(out2):
+                    print(f"comment retry ok len={len(out2)}", flush=True)
+                    return out2
+        except Exception as e:
+            print("comment llm fail", type(e).__name__, str(e)[:160], flush=True)
+    else:
+        print("comment no brain → smart fallback", flush=True)
+
+    print("comment fallback (smart local)", flush=True)
     return _comment_fallback(comment_text, post_context=post_context, username=username)
 
 
@@ -1749,73 +1783,178 @@ def _comment_fallback(
     post_context: str = "",
     username: str = "",
 ) -> str:
-    """Живой запасной ответ, если мозг недоступен (Bothost без ключа и т.п.)."""
+    """
+    Живой ответ без LLM. Никогда не «Слышу / уточни».
+    Цель: подписчик чувствует разговор, не отписку.
+    """
     t = (comment_text or "").strip()
     low = t.lower()
     name = (username or "").strip()
     hi = f"{name}, " if name and not name.startswith("?") else ""
+    clip = re.sub(r"\s+", " ", t)[:100]
+    if len(t) > 100:
+        clip = clip[:97] + "…"
 
-    # темы ИИ
+    # ——— канал / бот / розыгрыш / заказы ———
+    if any(w in low for w in ("розыгрыш", "участв", "приз", "барабан", "скрины", "скрин репост")):
+        return (
+            f"{hi}розыгрыш: 1) подписка @Vaggo01 2) репост другу "
+            "3) скрин в @DirectorVaggobot → «Участвовать». "
+            "В барабан только после проверки шагов 🔥"
+        )
+    if any(w in low for w in ("заказ", "прайс", "цен", "сколько стоит", "сделай бот", "сайт сделай")):
+        return (
+            f"{hi}заказы — @DirectorVaggobot → «Заказать», прайс /prices. "
+            "В фикс входит код/работа, хостинг и домен отдельно."
+        )
+    if any(w in low for w in ("вагго", "директор", "бот ", " @director")):
+        if any(w in low for w in ("как дела", "как ты", "жив", "работа")):
+            return (
+                f"{hi}в строю 🔥 канал, розыгрыш, заказы — крутятся. "
+                "Ты как, что сейчас пилишь?"
+            )
+        if any(w in low for w in ("когда", "финал", "чм", "чемпионат")):
+            return (
+                f"{hi}если про спорт — дату лучше глянуть на fifa.com / sports.ru, "
+                "я без live-ленты сейчас. За кого болеешь?"
+            )
+
+    # ——— ИИ ———
     if any(w in low for w in ("chatgpt", "чатгпт", "gpt-4", "gpt4", " gpt")):
-        return f"{hi}ChatGPT удобен на быстрый текст/код/план: https://chatgpt.com — что именно пробуешь?"
+        return (
+            f"{hi}ChatGPT — быстрый текст/код/план: chatgpt.com. "
+            "Для агента в терминале смотри Grok Build / Cursor. Что именно нужно?"
+        )
     if "claude" in low or "клод" in low:
-        return f"{hi}Claude часто лучше на длинные тексты: https://claude.ai — сравнишь с тем, что в посте?"
+        return (
+            f"{hi}Claude часто сильнее на длинные тексты и аккуратный тон: claude.ai. "
+            "Сравниваешь с кем — GPT или Grok?"
+        )
+    if "grok build" in low or "грок билд" in low or "grok build" in low:
+        return (
+            f"{hi}Grok Build — CLI-агент: ставишь → `grok` в папке проекта → "
+            "он правит файлы и гоняет команды. Нужен SuperGrok/Premium+. "
+            "Ставил уже или только читаешь?"
+        )
     if "grok" in low or "грок" in low:
-        return f"{hi}Grok — https://grok.x.ai · прямой тон и идеи. Чем пользуешься чаще?"
-    if "gemini" in low or "джемини" in low or "google ai" in low or "google one" in low:
         return (
-            f"{hi}Gemini / Google AI Pro — https://gemini.google.com · "
-            "если про розыгрыш — условия в посте и кнопка «Участвовать»."
+            f"{hi}Grok 4.5 — флагман (код/агенты), Build — руки в терминале. "
+            "Чат: grok.x.ai · CLI: x.ai/cli. Чем пользуешься чаще?"
         )
-    if "perplex" in low or "перплекс" in low:
-        return f"{hi}Perplexity — https://www.perplexity.ai · факты со ссылками. Что ищешь?"
-    if any(w in low for w in ("розыгрыш", "gemini pro", "участв", "приз", "скрины", "скрин")):
+    if "gemini" in low or "джемини" in low or "google ai" in low:
         return (
-            f"{hi}по розыгрышу: подписка @Vaggo01 + репост другу → скрин в @DirectorVaggobot. "
-            "Если бот ругается — кинь скрин ещё раз или напиши владельцу."
+            f"{hi}Gemini / Google AI: gemini.google.com. "
+            "Если про розыгрыш Pro — кнопка «Участвовать» под постом + скрин боту."
         )
-    if any(w in low for w in ("заказ", "бот сделай", "сайт", "сколько стоит", "прайс", "цен")):
+    if "cursor" in low or "курсор" in low:
         return (
-            f"{hi}заказы — в @DirectorVaggobot → «Заказать», прайс /prices. "
-            "Хостинг/домен отдельно, не в цене."
+            f"{hi}Cursor — IDE с агентом в редакторе; Grok Build — агент в терминале. "
+            "Многие держат оба. Ты в каком стеке?"
         )
-    if any(w in low for w in ("ссылк", "где открыть", "сайт ", "зайти", "как зайти")):
+    if any(w in low for w in ("промпт", "prompt", "как спросить", "как писать")):
         return (
-            f"{hi}база: chatgpt.com · claude.ai · grok.x.ai · gemini.google.com · "
-            "perplexity.ai — что именно нужно?"
+            f"{hi}сильный промпт: цель → контекст → ограничения → формат ответа. "
+            "Пример: «сделай X, не трогай Y, выдай diff». Кинь свою задачу — сожмём в промпт."
         )
-    if any(w in low for w in ("как дела", "как ты", "как сам", "как жизнь", "how are you")):
-        return f"{hi}нормально 🔥 кручу канал и стек. Ты как — что сейчас в приоритете?"
-    if any(w in low for w in ("привет", "здаров", "здарова", "хай", "ку ", "hello", "йо ")):
-        return f"{hi}йо 🔥 на связи. Пиши по делу или в тему поста — разберём."
-    if any(w in low for w in ("крут", "огонь", "топ", "класс", "люблю", "👍", "🔥")):
-        return f"{hi}зашло 🔥 а сам чем из стека чаще всего пользуешься?"
-    # спорт / чм
-    if any(w in low for w in ("финал", "чм", "чемпионат мира", "world cup", "месси", "аргентин")):
+    if any(w in low for w in ("нейросет", " llm", "ии ", " ai", "модель")):
         return (
-            f"{hi}если про футбол ЧМ — дату лучше сверить на fifa.com/sports (год от года плывёт). "
-            "За кого болеешь — Аргентина/Месси или свой вариант?"
+            f"{hi}сейчас расклад: fast — на поток, флагман — на сложное, "
+            "агент (Build/Cursor) — когда надо трогать файлы. Что пилишь?"
         )
-    if any(w in low for w in ("точк", "•••", "...", "мат ", "бан")):
-        return f"{hi}ага, точки вместо мата — чтобы не словить бан. Норм тактика 😄"
-    if "?" in t or any(
-        w in low for w in ("как ", "что ", "почему", "зачем", "какой", "можно ли", "когда ")
+
+    # ——— код / пк ———
+    if any(w in low for w in ("python", "javascript", "typescript", " rust", "баг", "github", "api")):
+        return (
+            f"{hi}по коду лучше так: что за стек, что сломалось, что уже пробовал. "
+            "Кинь 3 строки — разберём без воды."
+        )
+    if any(w in low for w in ("windows", "пк ", "ноут", "тормозит", "оптимиз")):
+        return (
+            f"{hi}классика: автозагрузка, диск C, фоновые UWP, драйвер GPU. "
+            "Что именно бесит — старт, браузер или игры?"
+        )
+
+    # ——— спорт ———
+    if any(
+        w in low
+        for w in (
+            "финал",
+            "чм",
+            "чемпионат мира",
+            "world cup",
+            "месси",
+            "аргентин",
+            "футбол",
+            "барса",
+            "реал",
+        )
     ):
-        clip = t.replace("\n", " ").strip()
-        if len(clip) > 90:
-            clip = clip[:87] + "…"
         return (
-            f"{hi}по «{clip}»: без Grok сейчас отвечу коротко — кинь цель "
-            "(что нужно на выходе), разложу по шагам."
+            f"{hi}футбол 🔥 даты/составы лучше сверять на fifa.com или sports.ru — "
+            "год от года плывут. За кого болеешь — Аргентина/Месси или свой клуб?"
         )
-    clip = t.replace("\n", " ").strip()
-    if len(clip) > 70:
-        clip = clip[:67] + "…"
-    if clip:
-        return f"{hi}понял: «{clip}». Согласен / свой опыт / вопрос — что из трёх?"
+
+    # ——— smalltalk ———
+    if any(w in low for w in ("как дела", "как ты", "как сам", "как жизнь", "how are you")):
+        return f"{hi}в темпе 🔥 посты, бот, стек. Ты как — что сегодня в приоритете?"
+    if any(w in low for w in ("привет", "здаров", "здарова", "хай", "hello", "йо", "доброе", "добрый")):
+        return f"{hi}йо 🔥 рад видеть. Что на уме — ИИ, код, заказ или просто поболтать?"
+    if any(w in low for w in ("спасибо", "благодар", "thx", "пасиб")):
+        return f"{hi}всегда 🔥 заходи ещё, тут без воды."
+    if any(w in low for w in ("крут", "огонь", "топ", "класс", "имба", "пушка", "люблю", "согласен", "+1")):
+        return f"{hi}зашло 🔥 а сам с какой стороны зашёл — уже пробовал или только читаешь?"
+    if any(w in low for w in ("точк", "мат ", "бан", "цензур")):
+        return f"{hi}ага, точки вместо мата — чтобы чат жил. Норм тактика 😄"
+
+    # ——— вопросы ———
+    if "?" in t or any(
+        w in low
+        for w in (
+            "как ",
+            "что ",
+            "почему",
+            "зачем",
+            "какой",
+            "какая",
+            "можно ли",
+            "когда ",
+            "где ",
+            "сколько",
+        )
+    ):
+        # честный ответ-скелет, не «уточни»
+        if any(w in low for w in ("когда", "дата", "во сколько", "сколько стоит")):
+            return (
+                f"{hi}по «{clip}»: точную цифру/дату без live-ленты не выдумываю. "
+                "Сверь на официальном сайте темы — и кинь, что нашёл, обсудим выбор."
+            )
+        if any(w in low for w in ("как ", "как сделать", "как поставить", "как установить")):
+            return (
+                f"{hi}по «{clip}» схема обычно такая: 1) цель 2) минимальный стек "
+                "3) один рабочий шаг сегодня 4) не расползаться. "
+                "Напиши стек (Win/Mac, язык) — сузим до 3 шагов."
+            )
+        return (
+            f"{hi}по «{clip}» — нормальный вопрос. "
+            "Коротко: зависит от цели и ограничений. "
+            "Скажи, что на выходе нужно (результат за 1 вечер) — разложу по шагам."
+        )
+
+    # ——— мнение / реплика к посту ———
     if post_context:
-        return f"{hi}интересный угол. А ты с постом согласен или есть другой взгляд?"
-    return f"{hi}кинь вопрос или мысль по теме — отвечу по делу."
+        pc = re.sub(r"\s+", " ", (post_context or ""))[:80]
+        return (
+            f"{hi}понял тебя: «{clip}». "
+            f"Если цепляет пост («{pc}…») — кинь: согласен / спорно / свой кейс. "
+            "Разберём без воды 🔥"
+        )
+    if clip:
+        return (
+            f"{hi}принял: «{clip}». "
+            "Могу: согласиться и добавить угол / поспорить мягко / дать схему. "
+            "Что полезнее тебе сейчас?"
+        )
+    return f"{hi}на связи 🔥 кинь мысль или вопрос — отвечу по делу, без отписок."
 
 
 def rewrite_post(text: str, *, note: str = "") -> str:
