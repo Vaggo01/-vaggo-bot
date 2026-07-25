@@ -407,12 +407,24 @@ def primary_category(hits: list[str]) -> str:
 
 
 def blocked_user_message() -> str:
+    # документы (Platega/банк) — всегда, даже при блоке
+    try:
+        from terms_lib import PRIVACY_URL, AGREEMENT_URL
+    except Exception:
+        PRIVACY_URL = "https://telegra.ph/Politika-konfidencialnosti-Director-Vaggo-07-25"
+        AGREEMENT_URL = (
+            "https://telegra.ph/Polzovatelskoe-soglashenie-Director-Vaggo-07-25"
+        )
     return (
         "🚫 <b>Доступ ограничен</b>\n\n"
         "Аккаунт заблокирован: в ТЗ/запросе найдены признаки "
         "<b>запрещённой</b> задачи (закон / правила сервиса).\n\n"
         "Снять блок может <b>только владелец</b> (если ошибка — напиши ему).\n\n"
-        "Пока блок активен: заказы, баланс и сервисы недоступны."
+        "Пока блок активен: заказы, баланс и сервисы недоступны.\n\n"
+        "📋 <b>Документы сервиса (всегда доступны)</b>\n"
+        f'🔒 <a href="{PRIVACY_URL}">Политика конфиденциальности</a>\n'
+        f'📜 <a href="{AGREEMENT_URL}">Оферта / соглашение</a>\n'
+        "/legal · /privacy · /offer"
     )
 
 

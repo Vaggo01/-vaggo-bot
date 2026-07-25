@@ -308,7 +308,7 @@ def full_keyboard(*, accepted: bool = False) -> dict:
 
 
 def after_accept_keyboard(user_id: int | None = None) -> dict:
-    """Меню клиента — крупный CTA, всё под рукой."""
+    """Меню клиента — крупный CTA; документы (Platega) всегда на виду."""
     rows = [[{"text": "🛠  Заказать", "callback_data": "ord:restart"}]]
     if user_id:
         try:
@@ -332,6 +332,9 @@ def after_accept_keyboard(user_id: int | None = None) -> dict:
                 {"text": "💰  Прайс", "callback_data": "legal:prices"},
                 {"text": "🆘  Поддержка", "callback_data": "sup:home"},
             ],
+            # постоянные URL — работают без «Принимаю» и без callback
+            *legal_docs_row(),
+            [{"text": "📋  Все документы", "callback_data": "legal:hub"}],
             [
                 {"text": "📢  Канал", "url": "https://t.me/Vaggo01"},
                 {"text": "🔗  Реферал", "callback_data": "ref:me"},
@@ -458,6 +461,8 @@ def user_home_html(user_id: int | None = None) -> str:
         "✦  <b>Director Vaggo</b>",
         "бот · сайт · скрипт · дизайн",
         "─" * 16,
+        f'📋 Документы всегда: <a href="{PRIVACY_URL}">политика</a> · '
+        f'<a href="{AGREEMENT_URL}">оферта</a> · /legal',
     ]
     if user_id:
         try:

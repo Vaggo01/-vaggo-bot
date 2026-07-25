@@ -77,8 +77,8 @@ except ImportError:  # pragma: no cover
     print("WARN: chat_mod_lib missing — chat moderation disabled", flush=True)
 
 _last_queue_tick = 0.0
-# 4.6.1 — Vaggo legal docs for Platega (privacy + offer on telegra)
-BOT_CODE_VERSION = "4.6.1"
+# 4.6.2 — legal always visible (menu/block/commands); free brain = session/bridge
+BOT_CODE_VERSION = "4.6.2"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:
@@ -2089,14 +2089,29 @@ def handle_callback(cfg: dict, state: dict, cq: dict) -> None:
         handle_mod_callback(cfg, state, cq)
         return
 
-    # Блок — жёсткий (кроме владельца)
+    # Блок — жёсткий (кроме владельца). terms/legal уже обработаны выше → документы доступны
     if uid and not is_owner(cfg, user) and mod.is_blocked(uid):
         try:
             tg.answer_callback(cfg, cq["id"], "Аккаунт заблокирован", show_alert=True)
         except Exception:
             pass
         if chat_id:
-            tg.send_message(cfg, chat_id, mod.blocked_user_message(), parse_mode="HTML")
+            tg.send_message(
+                cfg,
+                chat_id,
+                mod.blocked_user_message(),
+                parse_mode="HTML",
+                disable_preview=False,
+                reply_markup={
+                    "inline_keyboard": [
+                        [
+                            {"text": "🔒 Политика", "url": terms.PRIVACY_URL},
+                            {"text": "📜 Оферта", "url": terms.AGREEMENT_URL},
+                        ],
+                        [{"text": "📋 Документы", "callback_data": "legal:hub"}],
+                    ]
+                },
+            )
         return
 
     # Меню пользователя (после accept)
@@ -4115,7 +4130,7 @@ def require_terms_or_gate(
 
 
 def require_not_blocked(cfg: dict, msg: dict) -> bool:
-    """True = стоп (показали блок). Владелец проходит."""
+    """True = стоп (показали блок). Владелец проходит. Документы — всегда."""
     chat = msg.get("chat") or {}
     if chat.get("type") != "private":
         return False
@@ -4125,15 +4140,68 @@ def require_not_blocked(cfg: dict, msg: dict) -> bool:
     uid = int(user.get("id") or 0)
     if not uid or not mod.is_blocked(uid):
         return False
-    # owner commands for self? no
     text = (msg.get("text") or "").strip().lower()
     cmd = text.split()[0].split("@")[0] if text.startswith("/") else ""
-    if cmd in ("/start", "/terms", "/help"):
+    # юр. документы и прайс — не режем (Platega / банк / прозрачность)
+    if cmd in (
+        "/legal",
+        "/docs",
+        "/документы",
+        "/privacy",
+        "/конфиденциальность",
+        "/agreement",
+        "/offer",
+        "/соглашение",
+        "/оферта_док",
+        "/public_offer",
+        "/публичная_оферта",
+        "/prices",
+        "/pricing",
+        "/tariffs",
+        "/тарифы",
+        "/цены",
+        "/terms",
+        "/rules",
+        "/policy",
+        "/правила",
+        "/политика",
+        "/условия",
+        "/оферта",
+    ):
+        return False
+    if cmd in ("/start", "/help", "/support", "/помощь"):
         tg.send_message(
-            cfg, chat.get("id"), mod.blocked_user_message(), parse_mode="HTML"
+            cfg,
+            chat.get("id"),
+            mod.blocked_user_message(),
+            parse_mode="HTML",
+            disable_preview=False,
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {"text": "🔒 Политика", "url": terms.PRIVACY_URL},
+                        {"text": "📜 Оферта", "url": terms.AGREEMENT_URL},
+                    ],
+                    [{"text": "📋 Документы", "callback_data": "legal:hub"}],
+                ]
+            },
         )
         return True
-    tg.send_message(cfg, chat.get("id"), mod.blocked_user_message(), parse_mode="HTML")
+    tg.send_message(
+        cfg,
+        chat.get("id"),
+        mod.blocked_user_message(),
+        parse_mode="HTML",
+        disable_preview=False,
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {"text": "🔒 Политика", "url": terms.PRIVACY_URL},
+                    {"text": "📜 Оферта", "url": terms.AGREEMENT_URL},
+                ]
+            ]
+        },
+    )
     return True
 
 
@@ -8716,6 +8784,7 @@ def run() -> None:
             cfg,
             "Вагго — заказы (бот/сайт/дизайн), розыгрыши, ответы в комментах канала.\n"
             "/start — меню · /order — заказ · /support — поддержка\n"
+            "/legal — политика и оферта (всегда доступны)\n"
             "Канал: @Vaggo01",
         )
     except Exception as e:
@@ -8727,6 +8796,9 @@ def run() -> None:
         {"command": "myorders", "description": "📦 Мои заказы"},
         {"command": "balance", "description": "💳 Баланс"},
         {"command": "prices", "description": "💰 Прайс"},
+        {"command": "legal", "description": "📋 Документы (всегда)"},
+        {"command": "privacy", "description": "🔒 Политика"},
+        {"command": "offer", "description": "📜 Оферта"},
         {"command": "support", "description": "🆘 Поддержка"},
         {"command": "ref", "description": "🔗 Реферальная ссылка"},
     ]
