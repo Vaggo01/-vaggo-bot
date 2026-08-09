@@ -363,6 +363,11 @@ def _status_is_fail(status: str) -> bool:
     )
 
 
+def _status_is_chargeback(status: str) -> bool:
+    s = (status or "").strip().upper()
+    return s in ("CHARGEBACK", "REFUNDED", "REFUND", "REVERSED")
+
+
 def handle_webhook_payload(payload: dict) -> dict:
     """
     Callback Platega:
@@ -399,6 +404,26 @@ def handle_webhook_payload(payload: dict) -> dict:
     if _status_is_fail(status):
         failed = apply_fail(pid, reason=status)
         return {"ok": True, "action": "fail", "payment": failed}
+    if _status_is_chargeback(status):
+        # возврат: помечаем failed + пробуем списать с баланса (если ещё есть)
+        try:
+            uid = int(item.get("user_id") or 0)
+            amount = int(item.get("amount") or 0)
+            if uid and amount and item.get("status") == "paid":
+                try:
+                    bal.debit(
+                        uid,
+                        amount,
+                        kind="platega_chargeback",
+                        note=f"CHARGEBACK {pid}",
+                        ref=str(ext or pid)[:64],
+                    )
+                except Exception as de:
+                    print("platega chargeback debit", de, flush=True)
+        except Exception:
+            pass
+        failed = apply_fail(pid, reason="CHARGEBACK")
+        return {"ok": True, "action": "chargeback", "payment": failed}
     return {"ok": False, "error": "unhandled", "status": status, "pid": pid}
 
 
