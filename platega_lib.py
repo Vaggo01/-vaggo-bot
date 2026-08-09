@@ -252,6 +252,22 @@ def create_payment(
         item["status"] = "waiting" if redirect else "pending_api"
         item["raw"] = data
         item["expires_in"] = data.get("expiresIn") or data.get("expires_in") or ""
+        # фактическая сумма к оплате (иногда +комиссия)
+        pay_amt = None
+        pd = data.get("paymentDetails")
+        if isinstance(pd, dict) and pd.get("amount") is not None:
+            try:
+                pay_amt = float(pd.get("amount"))
+            except Exception:
+                pay_amt = None
+        elif isinstance(pd, str):
+            # "114.00 RUB"
+            try:
+                pay_amt = float(pd.replace("RUB", "").replace("₽", "").strip().split()[0])
+            except Exception:
+                pay_amt = None
+        if pay_amt is not None:
+            item["pay_amount"] = pay_amt
         if not redirect:
             item["note"] = "API ok, но нет redirect URL — проверь ответ Platega"
     except RuntimeError:
@@ -488,23 +504,34 @@ def format_pay_message(item: dict) -> str:
     import html as H
 
     amount = int(item.get("amount") or 0)
+    pay_amt = item.get("pay_amount")
+    try:
+        pay_amt_f = float(pay_amt) if pay_amt is not None else float(amount)
+    except Exception:
+        pay_amt_f = float(amount)
     pid = H.escape(str(item.get("id") or ""))
     url = str(item.get("pay_url") or "").strip()
     exp = H.escape(str(item.get("expires_in") or ""))
     lines = [
         "💳 <b>Пополнение через Platega</b>",
         "",
-        f"Сумма: <b>{amount}</b> ₽",
+        f"На баланс: <b>{amount}</b> ₽",
+    ]
+    if abs(pay_amt_f - float(amount)) >= 0.01:
+        lines.append(f"К оплате (с комиссией): <b>{pay_amt_f:g}</b> ₽")
+    else:
+        lines.append(f"К оплате: <b>{amount}</b> ₽")
+    lines += [
         f"Заявка: <code>{pid}</code>",
         "",
-        "1) Жми «Оплатить» — откроется СБП / страница оплаты",
-        "2) Оплати точную сумму",
-        "3) Баланс зачислится автоматически (обычно до 1–2 мин)",
+        "1) Жми «Оплатить» — СБП / страница оплаты",
+        "2) Оплати сумму «к оплате»",
+        "3) На баланс придёт выбранная сумма (авто, 1–2 мин)",
         "",
-        "Если не пришло — /balance через минуту или /support",
+        "Не пришло — «Проверить оплату» или /balance · /support",
     ]
     if exp:
-        lines.insert(5, f"Таймер оплаты: <code>{exp}</code>")
+        lines.insert(5, f"Таймер: <code>{exp}</code>")
     if not url:
         lines.append("")
         lines.append("⚠️ Ссылка оплаты не пришла — напиши /support")
