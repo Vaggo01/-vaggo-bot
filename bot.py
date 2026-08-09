@@ -78,7 +78,7 @@ except ImportError:  # pragma: no cover
 
 _last_queue_tick = 0.0
 # 4.6.8 — orders without Grok ok; hide similar to client; pay gate; balance seed
-BOT_CODE_VERSION = "4.7.3"
+BOT_CODE_VERSION = "4.7.4"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:
@@ -2158,6 +2158,11 @@ def handle_callback(cfg: dict, state: dict, cq: dict) -> None:
     # Баланс / СБП
     if data.startswith("bal:"):
         handle_balance_callback(cfg, state, cq)
+        return
+
+    # Platega: проверить / отмена
+    if data.startswith("pay:"):
+        handle_platega_callback(cfg, state, cq)
         return
 
     # Всё остальное (меню, черновики, пауза…) — ТОЛЬКО владелец
@@ -4829,6 +4834,69 @@ def _start_topup_flow(
     if not bal.topup_enabled(cfg):
         tg.send_message(cfg, chat_id, bal.topup_disabled_text(), parse_mode="HTML")
         return True
+
+    # 1) Platega (основной путь)
+    try:
+        import platega_lib as platega
+
+        if platega.ready(cfg):
+            try:
+                item = platega.create_payment(
+                    cfg,
+                    user_id=uid,
+                    amount=int(amount),
+                    username=uname,
+                    description=f"Vaggo balance +{int(amount)} RUB @{uname or uid}",
+                )
+            except Exception as e:
+                print("platega create", type(e).__name__, e, flush=True)
+                tg.send_message(
+                    cfg,
+                    chat_id,
+                    "⚠️ Не удалось создать платёж Platega.\n"
+                    f"<code>{html.escape(str(e)[:200])}</code>\n"
+                    "Попробуй позже или /support",
+                    parse_mode="HTML",
+                )
+                notify_owner(
+                    cfg,
+                    f"⚠️ Platega create fail uid={uid} {amount}₽\n"
+                    f"<code>{html.escape(str(e)[:300])}</code>",
+                )
+                return True
+            text = platega.format_pay_message(item)
+            ui_edit_or_send(
+                cfg,
+                chat_id,
+                text,
+                reply_markup=platega.pay_keyboard(item),
+                message_id=message_id,
+                state=state,
+                uid=uid,
+                store_key="bal_ui_msg",
+            )
+            notify_owner(
+                cfg,
+                f"💳 Platega заявка {html.escape(str(item.get('id')))}\n"
+                f"user <code>{uid}</code> @{html.escape(uname or '—')} · "
+                f"<b>{int(amount)}</b> ₽",
+            )
+            return True
+    except Exception as e:
+        print("platega topup branch", e, flush=True)
+
+    # 2) fallback — старый ручной СБП (если включён)
+    sbp = bal.sbp_cfg(cfg)
+    if not (cfg.get("sbp") or {}).get("enabled"):
+        tg.send_message(
+            cfg,
+            chat_id,
+            "⚠️ Оплата: Platega не настроена (нет ключей на хосте).\n"
+            "Владелец: env <code>PLATEGA_MERCHANT_ID</code> + "
+            "<code>PLATEGA_SECRET</code>.\n/support",
+            parse_mode="HTML",
+        )
+        return True
     try:
         top = bal.create_topup(
             user_id=uid, amount=amount, username=uname, name=name
@@ -4847,7 +4915,6 @@ def _start_topup_flow(
         uid=uid,
         store_key="bal_ui_msg",
     )
-    # QR (номер не светим)
     pay = int(top.get("pay_exact") or top.get("amount") or amount)
     qp = bal.qr_path(cfg)
     if qp:
@@ -4864,8 +4931,7 @@ def _start_topup_flow(
             )
         except Exception as e:
             print("sbp qr send", e, flush=True)
-    s = bal.sbp_cfg(cfg)
-    if not s.get("qr_ok"):
+    if not sbp.get("qr_ok"):
         notify_owner(
             cfg,
             "⚠️ Клиент /topup, но QR ещё не загружен.\n"
@@ -4873,6 +4939,105 @@ def _start_topup_flow(
             f"user <code>{uid}</code> · {pay} ₽ · "
             f"<code>{html.escape(str(top['id']))}</code>",
         )
+    return True
+
+
+def handle_platega_callback(cfg: dict, state: dict, cq: dict) -> bool:
+    """pay:check:ID | pay:cancel:ID"""
+    data = cq.get("data") or ""
+    if not data.startswith("pay:"):
+        return False
+    try:
+        import platega_lib as platega
+    except Exception as e:
+        tg.answer_callback(cfg, cq["id"], "Platega offline", show_alert=True)
+        print("platega import", e, flush=True)
+        return True
+
+    user = cq.get("from") or {}
+    uid = int(user.get("id") or 0)
+    msg = cq.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    mid = msg.get("message_id")
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    pid = parts[2] if len(parts) > 2 else ""
+
+    item = platega.get_payment(pid) if pid else None
+    if not item:
+        tg.answer_callback(cfg, cq["id"], "Заявка не найдена", show_alert=True)
+        return True
+    if int(item.get("user_id") or 0) != uid and not is_owner(cfg, user):
+        tg.answer_callback(cfg, cq["id"], "Чужая заявка", show_alert=True)
+        return True
+
+    if action == "cancel":
+        if item.get("status") == "paid":
+            tg.answer_callback(cfg, cq["id"], "Уже оплачено")
+            return True
+        try:
+            platega.apply_fail(pid, reason="user_cancel")
+        except Exception:
+            pass
+        tg.answer_callback(cfg, cq["id"], "Отменено")
+        if chat_id:
+            tg.send_message(
+                cfg,
+                chat_id,
+                "❌ Заявка отменена. /topup — новая.",
+                parse_mode="HTML",
+            )
+        return True
+
+    if action == "check":
+        tg.answer_callback(cfg, cq["id"], "Проверяю…")
+        updated = item
+        try:
+            if item.get("external_id"):
+                updated = platega.sync_payment_status(cfg, item) or item
+        except Exception as e:
+            print("pay check", e, flush=True)
+        st = str((updated or item).get("status") or "")
+        if st == "paid":
+            bal_now = bal.get_balance(uid)
+            text = (
+                f"✅ <b>Оплата прошла</b>\n"
+                f"+{int(item.get('amount') or 0)} ₽\n"
+                f"Баланс: <b>{bal_now}</b> ₽\n\n"
+                f"/order — заказ · /balance — карта"
+            )
+            if chat_id:
+                try:
+                    tg.edit_message_text(
+                        cfg, chat_id, int(mid), text, parse_mode="HTML"
+                    )
+                except Exception:
+                    tg.send_message(cfg, chat_id, text, parse_mode="HTML")
+            notify_owner(
+                cfg,
+                f"✅ Platega paid uid=<code>{uid}</code> "
+                f"+{int(item.get('amount') or 0)} ₽ · <code>{html.escape(pid)}</code>",
+            )
+            return True
+        if st == "failed":
+            if chat_id:
+                tg.send_message(
+                    cfg,
+                    chat_id,
+                    "❌ Платёж не прошёл / отменён. /topup — снова.",
+                    parse_mode="HTML",
+                )
+            return True
+        if chat_id:
+            tg.send_message(
+                cfg,
+                chat_id,
+                "⏳ Ещё не видно оплаты. Оплати по кнопке и нажми «Проверить» через 20–60 сек.",
+                parse_mode="HTML",
+            )
+        return True
+
+    tg.answer_callback(cfg, cq["id"], "ok")
     return True
 
 
@@ -8981,6 +9146,36 @@ def run() -> None:
                 tick_finance_digest(cfg)
             except Exception as fe:
                 print("finance digest tick", fe, flush=True)
+            # Platega: автозачисление по статусу API (Bothost без webhook)
+            try:
+                import platega_lib as _platega
+
+                if _platega.ready(cfg):
+                    for ev in _platega.poll_pending(cfg, limit=20):
+                        pay = ev.get("payment") or {}
+                        if ev.get("action") == "credit" and pay:
+                            uid_p = int(pay.get("user_id") or 0)
+                            amt = int(pay.get("amount") or 0)
+                            if uid_p:
+                                try:
+                                    bal_now = bal.get_balance(uid_p)
+                                    tg.send_message(
+                                        cfg,
+                                        uid_p,
+                                        f"✅ <b>Баланс пополнен</b>\n"
+                                        f"+{amt} ₽ · итого <b>{bal_now}</b> ₽\n"
+                                        f"/order · /balance",
+                                        parse_mode="HTML",
+                                    )
+                                except Exception as ne:
+                                    print("platega notify user", ne, flush=True)
+                                notify_owner(
+                                    cfg,
+                                    f"✅ Platega auto uid=<code>{uid_p}</code> "
+                                    f"+{amt} ₽ · <code>{html.escape(str(pay.get('id')))}</code>",
+                                )
+            except Exception as pe:
+                print("platega poll", type(pe).__name__, str(pe)[:120], flush=True)
             updates = tg.get_updates(cfg, offset=offset, timeout=25)
             dirty = False
             for u in updates:

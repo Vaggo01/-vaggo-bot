@@ -54,8 +54,10 @@
     "hint": "СБП. Сумма строго как в заявке."
   },
   "payments": {
-    "topup_enabled": false,
-    "provider": "platega"
+    "topup_enabled": true,
+    "provider": "platega",
+    "payment_method": 2,
+    "note": "Keys only via env: PLATEGA_MERCHANT_ID + PLATEGA_SECRET (never commit secrets)"
   },
   "support": {
     "telegram": "Vagdar1",

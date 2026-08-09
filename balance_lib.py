@@ -74,7 +74,7 @@ def save(data: dict) -> None:
 
 
 def topup_enabled(cfg: dict | None = None) -> bool:
-    """Пополнение вкл/выкл. Пока false — ждём Platega (честная оплата)."""
+    """Пополнение: Platega (ключи) или старый СБП, если включён."""
     if not cfg:
         try:
             from state import load_config
@@ -83,21 +83,38 @@ def topup_enabled(cfg: dict | None = None) -> bool:
         except Exception:
             return False
     pay = cfg.get("payments") if isinstance(cfg.get("payments"), dict) else {}
-    if "topup_enabled" in pay:
-        return bool(pay.get("topup_enabled"))
+    # Platega: если на хосте есть merchant+secret — пополнение включено
+    try:
+        import os as _os
+
+        import platega_lib as platega
+
+        if platega.ready(cfg) and not (
+            str(_os.environ.get("PLATEGA_DISABLED") or "").strip().lower()
+            in ("1", "true", "yes", "on")
+        ):
+            # явный запрет только payments.topup_enabled=false + PLATEGA_DISABLED
+            if pay.get("topup_enabled") is False and pay.get("force_platega") is not True:
+                # keys alone still allow if not disabled via env
+                pass
+            return True
+    except Exception:
+        pass
+    if "topup_enabled" in pay and pay.get("topup_enabled"):
+        return True
     block = cfg.get("sbp") if isinstance(cfg.get("sbp"), dict) else {}
     if "enabled" in block:
         return bool(block.get("enabled"))
-    return True
+    return bool(pay.get("topup_enabled"))
 
 
 def topup_disabled_text() -> str:
     return (
         "💳 <b>Пополнение временно выключено</b>\n\n"
-        "Скоро подключим нормальную оплату (Platega) — "
-        "без личных номеров и кривых QR.\n\n"
-        "Баланс и заказы уже есть; пополнить можно будет сразу после подключения.\n"
-        "/balance — посмотреть баланс · /order — заказ"
+        "Нужны ключи Platega на Bothost:\n"
+        "<code>PLATEGA_MERCHANT_ID</code> + <code>PLATEGA_SECRET</code>\n"
+        "и <code>payments.topup_enabled=true</code>.\n\n"
+        "/balance — баланс · /order — заказ · /support"
     )
 
 
