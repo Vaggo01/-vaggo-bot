@@ -48,6 +48,76 @@ def _cfg_payments(cfg: dict | None = None) -> dict:
     return pay
 
 
+SEALED_PATH = ROOT / "platega_sealed.json"
+
+
+def _xor_seal(raw: bytes, token: str) -> bytes:
+    import hashlib
+
+    key = hashlib.sha256((token or "vaggo").encode("utf-8")).digest()
+    return bytes(b ^ key[i % len(key)] for i, b in enumerate(raw))
+
+
+def write_sealed_credentials(
+    merchant_id: str,
+    secret: str,
+    *,
+    bot_token: str,
+    path: Path | None = None,
+) -> Path:
+    """Зашифровать ключи под bot_token (Bothost уже знает token). Не plaintext в git."""
+    import base64
+
+    payload = json.dumps(
+        {"merchant_id": merchant_id.strip(), "secret": secret.strip(), "v": 1},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    blob = base64.urlsafe_b64encode(_xor_seal(payload, bot_token)).decode("ascii")
+    out = path or SEALED_PATH
+    out.write_text(
+        json.dumps(
+            {
+                "note": "sealed with bot_token; do not edit by hand",
+                "alg": "xor-sha256-v1",
+                "blob": blob,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return out
+
+
+def _read_sealed(cfg: dict | None = None) -> tuple[str, str]:
+    cfg = cfg or {}
+    token = (cfg.get("bot_token") or os.environ.get("BOT_TOKEN") or "").strip()
+    if not token:
+        return "", ""
+    path = SEALED_PATH
+    if not path.is_file():
+        # deploy package path
+        alt = ROOT / "media" / "platega_sealed.json"
+        path = alt if alt.is_file() else path
+    if not path.is_file():
+        return "", ""
+    try:
+        import base64
+
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        blob = base64.urlsafe_b64decode((meta.get("blob") or "").encode("ascii"))
+        raw = _xor_seal(blob, token)  # xor again = decrypt
+        data = json.loads(raw.decode("utf-8"))
+        return (
+            str(data.get("merchant_id") or "").strip(),
+            str(data.get("secret") or "").strip(),
+        )
+    except Exception as e:
+        print("platega sealed read fail", type(e).__name__, str(e)[:80], flush=True)
+        return "", ""
+
+
 def credentials(cfg: dict | None = None) -> tuple[str, str]:
     pay = _cfg_payments(cfg)
     mid = (
@@ -60,6 +130,10 @@ def credentials(cfg: dict | None = None) -> tuple[str, str]:
         or (os.environ.get("PLATEGA_API_KEY") or "").strip()
         or str(pay.get("secret") or pay.get("api_key") or "").strip()
     )
+    if not mid or not secret:
+        sm, ss = _read_sealed(cfg)
+        mid = mid or sm
+        secret = secret or ss
     return mid, secret
 
 
