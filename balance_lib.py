@@ -83,29 +83,34 @@ def topup_enabled(cfg: dict | None = None) -> bool:
         except Exception:
             return False
     pay = cfg.get("payments") if isinstance(cfg.get("payments"), dict) else {}
-    # Platega: если на хосте есть merchant+secret — пополнение включено
+    # Platega: UI вкл только когда есть merchant+secret
     try:
         import os as _os
 
         import platega_lib as platega
 
-        if platega.ready(cfg) and not (
-            str(_os.environ.get("PLATEGA_DISABLED") or "").strip().lower()
-            in ("1", "true", "yes", "on")
-        ):
-            # явный запрет только payments.topup_enabled=false + PLATEGA_DISABLED
-            if pay.get("topup_enabled") is False and pay.get("force_platega") is not True:
-                # keys alone still allow if not disabled via env
-                pass
+        disabled = str(_os.environ.get("PLATEGA_DISABLED") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if platega.ready(cfg) and not disabled:
             return True
+        # provider=platega, но ключей нет → не показываем «Пополнить»
+        if str(pay.get("provider") or "").lower() == "platega" and not platega.ready(cfg):
+            block = cfg.get("sbp") if isinstance(cfg.get("sbp"), dict) else {}
+            return bool(block.get("enabled"))
     except Exception:
         pass
     if "topup_enabled" in pay and pay.get("topup_enabled"):
-        return True
+        # только если не ждём platega без ключей
+        if str(pay.get("provider") or "").lower() != "platega":
+            return True
     block = cfg.get("sbp") if isinstance(cfg.get("sbp"), dict) else {}
     if "enabled" in block:
         return bool(block.get("enabled"))
-    return bool(pay.get("topup_enabled"))
+    return False
 
 
 def topup_disabled_text() -> str:
