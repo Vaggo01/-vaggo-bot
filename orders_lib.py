@@ -27,49 +27,49 @@ _LOCK = threading.Lock()
 
 # Free-слоты отключены. Цена = услуга → фикс. сумма (для банка/Platega).
 FREE_LIMIT = 0
-PRICE_MAX = 500
-PRICE_MIN = 150
+PRICE_MAX = 600
+PRICE_MIN = 195
 
-# Услуга → цена. Всё. Без «оценок» и плавающих сумм.
+# Услуга → цена (+30% к 4.7.7). Всё. Без «оценок» и плавающих сумм.
 ORDER_TYPES: dict[str, dict[str, Any]] = {
     "design": {
         "title": "Дизайн / обложки",
-        "price": 150,
+        "price": 195,
         "hint": "аватар, обложка, 1–3 картинки",
         "includes": "макеты PNG/JPG по ТЗ",
         "not_includes": "хостинг, печать, брендбук",
     },
     "script": {
         "title": "Скрипт / автоматизация",
-        "price": 200,
+        "price": 260,
         "hint": "парсер, утилита, мелкий скрипт",
         "includes": "скрипт + короткая инструкция",
         "not_includes": "сервер, платные API",
     },
     "bot": {
         "title": "Telegram-бот",
-        "price": 250,
+        "price": 325,
         "hint": "меню, логика, простая админка",
         "includes": "код бота + README",
         "not_includes": "хостинг, VPS",
     },
     "site": {
         "title": "Сайт / лендинг",
-        "price": 250,
+        "price": 325,
         "hint": "1–5 страниц, HTML/простая сборка",
         "includes": "вёрстка/исходники по ТЗ",
         "not_includes": "домен, хостинг, SEO",
     },
     "app": {
         "title": "Приложение (MVP)",
-        "price": 350,
+        "price": 455,
         "hint": "базовый MVP по ТЗ",
         "includes": "функционал по ТЗ",
         "not_includes": "сторы, сервер 24/7",
     },
     "other": {
         "title": "Другое",
-        "price": 250,
+        "price": 325,
         "hint": "задача вне списка",
         "includes": "объём по ТЗ",
         "not_includes": "хостинг, домен, реклама",

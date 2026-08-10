@@ -78,7 +78,7 @@ except ImportError:  # pragma: no cover
 
 _last_queue_tick = 0.0
 # 4.6.8 — orders without Grok ok; hide similar to client; pay gate; balance seed
-BOT_CODE_VERSION = "4.7.7"
+BOT_CODE_VERSION = "4.7.8"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:
@@ -4523,6 +4523,18 @@ def handle_balance_private(cfg: dict, state: dict, msg: dict) -> bool:
             store_key="bal_ui_msg",
         )
         return True
+    if cmd in ("/points", "/баллы", "/pts"):
+        pts = bal.get_points(uid)
+        ui_edit_or_send(
+            cfg,
+            chat_id,
+            bal.format_points_help() + f"\n\nУ тебя: <b>{pts}</b> ⭐",
+            reply_markup=bal.points_keyboard(),
+            state=state,
+            uid=uid,
+            store_key="bal_ui_msg",
+        )
+        return True
 
     if cmd in ("/topup", "/пополнить", "/sbp", "/сбп"):
         if not bal.topup_enabled(cfg):
@@ -5072,6 +5084,40 @@ def handle_balance_callback(cfg: dict, state: dict, cq: dict) -> bool:
     if action == "show":
         tg.answer_callback(cfg, cq["id"], "Баланс")
         show(bal.format_balance_card(uid, cfg), bal.balance_keyboard(cfg))
+        return True
+    if action == "points":
+        tg.answer_callback(cfg, cq["id"], "Баллы")
+        pts = bal.get_points(uid)
+        show(
+            bal.format_points_help() + f"\n\nУ тебя: <b>{pts}</b> ⭐",
+            bal.points_keyboard(),
+        )
+        return True
+    if action == "redeem":
+        packs = 1
+        try:
+            packs = max(1, int(parts[2] if len(parts) > 2 else 1))
+        except Exception:
+            packs = 1
+        need = packs * int(bal.POINTS_REDEEM_PTS)
+        rub = packs * int(bal.POINTS_REDEEM_RUB)
+        try:
+            spent, got, left = bal.redeem_points_to_balance(uid, packs)
+            tg.answer_callback(cfg, cq["id"], f"+{got} ₽")
+            show(
+                f"✅ Обмен: −{spent} ⭐ → +<b>{got}</b> ₽\n"
+                f"Баланс: <b>{bal.get_balance(uid)}</b> ₽ · "
+                f"баллы: <b>{left}</b> ⭐",
+                bal.balance_keyboard(cfg),
+            )
+        except ValueError as e:
+            tg.answer_callback(cfg, cq["id"], str(e)[:120], show_alert=True)
+            show(
+                bal.format_points_help()
+                + f"\n\nУ тебя: <b>{bal.get_points(uid)}</b> ⭐\n"
+                f"Нужно минимум <b>{need}</b> для обмена на {rub} ₽.",
+                bal.points_keyboard(),
+            )
         return True
 
     if action == "topup":
@@ -7557,6 +7603,18 @@ def handle_orders_callback(cfg: dict, state: dict, cq: dict) -> bool:
                 return True
             item["paid_from_balance"] = pay
             item["balance_after"] = new_bal
+            try:
+                pts = bal.maybe_earn_points(
+                    uid,
+                    pay,
+                    kind="order",
+                    note=f"заказ {item['id']}",
+                    ref=str(item["id"]),
+                )
+                if pts:
+                    item["points_earned"] = pts
+            except Exception as pe:
+                print("order points", pe, flush=True)
             orders.save_order(item)
         drafts.pop(str(uid), None)
         check = orders.get_order(item["id"])
@@ -7590,6 +7648,11 @@ def handle_orders_callback(cfg: dict, state: dict, cq: dict) -> bool:
                 f"\n💰 Списано: <b>{item.get('paid_from_balance')}</b> ₽"
                 f" · остаток {item.get('balance_after')} ₽"
             )
+            if item.get("points_earned"):
+                pay_note += (
+                    f"\n⭐ +{int(item['points_earned'])} баллов "
+                    f"(всего {bal.get_points(uid)}) · /points"
+                )
         if chat_id:
             mid_card = ui_edit_or_send(
                 cfg,

@@ -32,6 +32,23 @@ TOPUP_MIN = 50
 TOPUP_MAX = 50_000
 TOPUP_TTL_SEC = 6 * 3600  # заявка живёт 6 часов
 
+# Баллы (лояльность)
+# 10% от пополнения и от оплаты заказа → баллы (1 балл ≈ «очко», не ₽)
+# Обмен: 100 баллов → 50 ₽ на баланс
+POINTS_EARN_PCT = 10
+POINTS_REDEEM_PTS = 100
+POINTS_REDEEM_RUB = 50
+# kinds credit, за которые начисляем баллы
+_POINTS_EARN_KINDS = frozenset(
+    {
+        "platega",
+        "sbp_topup",
+        "topup",
+        "owner_add",
+        "credit",
+    }
+)
+
 
 def _default() -> dict:
     return {"wallets": {}, "topups": {}, "ledger": [], "updated_at": 0}
@@ -345,9 +362,169 @@ def get_balance(user_id: int) -> int:
 
 def _wallet(data: dict, user_id: int) -> dict:
     k = str(int(user_id))
-    w = data["wallets"].setdefault(k, {"balance": 0, "username": "", "name": ""})
+    w = data["wallets"].setdefault(
+        k, {"balance": 0, "points": 0, "username": "", "name": ""}
+    )
     w.setdefault("balance", 0)
+    w.setdefault("points", 0)
     return w
+
+
+def points_from_rub(amount_rub: int) -> int:
+    """Сколько баллов начислить с суммы ₽ (floor, 10%)."""
+    a = int(amount_rub or 0)
+    if a <= 0:
+        return 0
+    return max(0, a * int(POINTS_EARN_PCT) // 100)
+
+
+def get_points(user_id: int) -> int:
+    """Баллы всегда с локального/seed файла (на Bothost — свой balance.json)."""
+    apply_balance_seed()
+    data = load()
+    w = data["wallets"].get(str(int(user_id))) or {}
+    return int(w.get("points") or 0)
+
+
+def add_points(
+    user_id: int,
+    points: int,
+    *,
+    kind: str = "points",
+    note: str = "",
+    ref: str = "",
+) -> int:
+    """Начислить баллы. Возвращает новый остаток баллов."""
+    points = int(points)
+    if points == 0:
+        return get_points(user_id)
+    if points < 0:
+        raise ValueError("points must be >= 0 for add")
+    data = load()
+    w = _wallet(data, user_id)
+    w["points"] = int(w.get("points") or 0) + points
+    new_pts = int(w["points"])
+    data.setdefault("ledger", []).insert(
+        0,
+        {
+            "id": new_id(),
+            "user_id": int(user_id),
+            "amount": 0,
+            "points": points,
+            "kind": kind,
+            "note": (note or "")[:200],
+            "ref": (ref or "")[:64],
+            "ts": int(time.time()),
+            "points_after": new_pts,
+            "balance_after": int(w.get("balance") or 0),
+        },
+    )
+    data["ledger"] = data["ledger"][:500]
+    save(data)
+    return new_pts
+
+
+def spend_points(
+    user_id: int,
+    points: int,
+    *,
+    kind: str = "points_spend",
+    note: str = "",
+    ref: str = "",
+) -> int:
+    """Списать баллы. ValueError если не хватает."""
+    points = int(points)
+    if points <= 0:
+        raise ValueError("points must be > 0")
+    data = load()
+    w = _wallet(data, user_id)
+    cur = int(w.get("points") or 0)
+    if cur < points:
+        raise ValueError(f"Недостаточно баллов: {cur}, нужно {points}")
+    w["points"] = cur - points
+    new_pts = int(w["points"])
+    data.setdefault("ledger", []).insert(
+        0,
+        {
+            "id": new_id(),
+            "user_id": int(user_id),
+            "amount": 0,
+            "points": -points,
+            "kind": kind,
+            "note": (note or "")[:200],
+            "ref": (ref or "")[:64],
+            "ts": int(time.time()),
+            "points_after": new_pts,
+            "balance_after": int(w.get("balance") or 0),
+        },
+    )
+    data["ledger"] = data["ledger"][:500]
+    save(data)
+    return new_pts
+
+
+def maybe_earn_points(
+    user_id: int,
+    amount_rub: int,
+    *,
+    kind: str = "",
+    note: str = "",
+    ref: str = "",
+) -> int:
+    """
+    Начислить % от суммы. Возвращает сколько баллов дали (0 если kind не для баллов).
+    """
+    k = (kind or "").strip().lower()
+    if k and k not in _POINTS_EARN_KINDS and k != "order":
+        return 0
+    pts = points_from_rub(amount_rub)
+    if pts <= 0:
+        return 0
+    add_points(
+        user_id,
+        pts,
+        kind="points_earn",
+        note=note or f"+{pts} б. с {amount_rub} ₽ ({kind})",
+        ref=ref,
+    )
+    return pts
+
+
+def redeem_points_to_balance(user_id: int, packs: int = 1) -> tuple[int, int, int]:
+    """
+    Обмен баллов на ₽.
+    packs: сколько пачек по POINTS_REDEEM_PTS.
+    Returns: (points_spent, rub_credited, points_left)
+    """
+    packs = max(1, int(packs))
+    need = packs * int(POINTS_REDEEM_PTS)
+    rub = packs * int(POINTS_REDEEM_RUB)
+    spend_points(
+        user_id,
+        need,
+        kind="points_redeem",
+        note=f"обмен {need} б. → {rub} ₽",
+    )
+    credit(
+        user_id,
+        rub,
+        kind="points_redeem",
+        note=f"обмен баллов ({need} → {rub} ₽)",
+    )
+    return need, rub, get_points(user_id)
+
+
+def format_points_help() -> str:
+    return (
+        f"⭐ <b>Баллы Vaggo</b>\n\n"
+        f"• +{POINTS_EARN_PCT}% баллами с <b>пополнения</b>\n"
+        f"• +{POINTS_EARN_PCT}% баллами с <b>оплаты заказа</b>\n"
+        f"• Обмен: <b>{POINTS_REDEEM_PTS}</b> баллов → "
+        f"<b>{POINTS_REDEEM_RUB}</b> ₽ на баланс\n\n"
+        f"Пример: пополнил 1000 ₽ → +{points_from_rub(1000)} баллов.\n"
+        f"Заказ на 325 ₽ → +{points_from_rub(325)} баллов.\n\n"
+        f"/points — мои баллы · /balance — кошелёк"
+    )
 
 
 def _ledger(
@@ -407,6 +584,14 @@ def credit(
         )
         bal = int(data.get("balance") or 0)
         _cache_remote_balance(int(user_id), bal, username=username, name=name)
+        # баллы — локально (мост может не знать)
+        if kind != "points_redeem":
+            try:
+                maybe_earn_points(
+                    user_id, amount, kind=kind, note=note, ref=ref
+                )
+            except Exception as e:
+                print("points earn remote-credit", e, flush=True)
         return bal
     data = load()
     w = _wallet(data, user_id)
@@ -429,6 +614,11 @@ def credit(
     data["ledger"].insert(0, entry)
     data["ledger"] = data["ledger"][:500]
     save(data)
+    if kind != "points_redeem":
+        try:
+            maybe_earn_points(user_id, amount, kind=kind, note=note, ref=ref)
+        except Exception as e:
+            print("points earn credit", e, flush=True)
     return bal
 
 
@@ -722,29 +912,37 @@ def format_balance_card(user_id: int, cfg: dict | None = None) -> str:
     except Exception:
         remote = False
     bal = get_balance(user_id)
+    pts = get_points(user_id)
+    packs = pts // int(POINTS_REDEEM_PTS)
     src = "облако↔ПК" if remote else "локально"
     lines = [
         "💰 <b>Баланс</b>",
         f"Доступно: <b>{bal}</b> ₽",
+        f"⭐ Баллы: <b>{pts}</b>"
+        + (
+            f" · можно обменять ≈ <b>{packs * POINTS_REDEEM_RUB}</b> ₽"
+            if packs
+            else ""
+        ),
         f"<i>источник: {src}</i>",
+        "",
+        f"Баллы: +{POINTS_EARN_PCT}% с пополнения и заказа · "
+        f"{POINTS_REDEEM_PTS} б. = {POINTS_REDEEM_RUB} ₽",
         "",
     ]
     if cfg is not None and not topup_enabled(cfg):
         lines.extend(
             [
-                "Пополнение <b>скоро</b> (честная оплата через кассу).",
-                "Сейчас пополнить нельзя — ждём подключение.",
+                "Пополнение временно недоступно.",
                 "",
-                "/balance — обновить",
+                "/points · /balance",
             ]
         )
     else:
         lines.extend(
             [
-                "Пополнение — <b>СБП</b> / касса.",
-                "Оплатил → зачисление на баланс.",
-                "",
-                "/topup — пополнить · /balance — обновить",
+                "Пополнение — Platega / СБП.",
+                "/topup · /points · /balance",
             ]
         )
     ledger = list_ledger(user_id, limit=5)
@@ -753,10 +951,15 @@ def format_balance_card(user_id: int, cfg: dict | None = None) -> str:
         lines.append("<b>Последние операции:</b>")
         for e in ledger:
             amt = int(e.get("amount") or 0)
-            sign = f"+{amt}" if amt >= 0 else str(amt)
+            pts_d = int(e.get("points") or 0)
+            if pts_d and not amt:
+                sign = f"{'+' if pts_d > 0 else ''}{pts_d} б."
+            else:
+                sign = f"+{amt}" if amt >= 0 else str(amt)
+                sign = f"{sign} ₽"
             kind = H.escape(str(e.get("kind") or ""))
             note = H.escape(str(e.get("note") or "")[:40])
-            lines.append(f"• {sign} ₽ · {kind}" + (f" · {note}" if note else ""))
+            lines.append(f"• {sign} · {kind}" + (f" · {note}" if note else ""))
     return "\n".join(lines)
 
 
@@ -932,8 +1135,31 @@ def balance_keyboard(cfg: dict | None = None) -> dict:
     if cfg is None or topup_enabled(cfg):
         rows.append([{"text": "💳 Пополнить", "callback_data": "bal:topup"}])
         rows.append([{"text": "📜 Мои заявки", "callback_data": "bal:mytop"}])
+    rows.append(
+        [
+            {"text": "⭐ Баллы", "callback_data": "bal:points"},
+            {"text": "🎁 Обмен 100→50₽", "callback_data": "bal:redeem:1"},
+        ]
+    )
     rows.append([{"text": "🔄 Обновить", "callback_data": "bal:show"}])
     return {"inline_keyboard": rows}
+
+
+def points_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🎁 100 б. → 50 ₽", "callback_data": "bal:redeem:1"},
+                {"text": "🎁 200 б. → 100 ₽", "callback_data": "bal:redeem:2"},
+            ],
+            [
+                {"text": "🎁 500 б. → 250 ₽", "callback_data": "bal:redeem:5"},
+            ],
+            [
+                {"text": "◀️ Баланс", "callback_data": "bal:show"},
+            ],
+        ]
+    }
 
 
 def topup_amounts_keyboard() -> dict:
