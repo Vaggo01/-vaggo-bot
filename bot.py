@@ -78,7 +78,7 @@ except ImportError:  # pragma: no cover
 
 _last_queue_tick = 0.0
 # 4.6.8 — orders without Grok ok; hide similar to client; pay gate; balance seed
-BOT_CODE_VERSION = "4.7.8"
+BOT_CODE_VERSION = "4.7.9"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:
@@ -2165,6 +2165,17 @@ def handle_callback(cfg: dict, state: dict, cq: dict) -> None:
         handle_platega_callback(cfg, state, cq)
         return
 
+    # Прайс / скидки — только владелец
+    if data.startswith("price:"):
+        if not is_owner(cfg, user):
+            try:
+                tg.answer_callback(cfg, cq["id"], "Только владелец", show_alert=True)
+            except Exception:
+                pass
+            return
+        handle_pricing_callback(cfg, state, cq)
+        return
+
     # Всё остальное (меню, черновики, пауза…) — ТОЛЬКО владелец
     if not is_owner(cfg, user):
         try:
@@ -3418,14 +3429,99 @@ def handle_terms_private(cfg: dict, state: dict, msg: dict) -> bool:
         return True
 
     if cmd in ("/prices", "/pricing", "/tariffs", "/тарифы", "/цены"):
+        # владелец — редактор; клиент — публичный прайс
+        if is_owner(cfg, user):
+            tg.send_message(
+                cfg,
+                chat_id,
+                orders.pricing_admin_html()
+                + "\n\n<i>Клиентам: тот же /prices без кнопок правок.</i>",
+                parse_mode="HTML",
+                reply_markup=orders.pricing_admin_keyboard(),
+                disable_preview=True,
+            )
+        else:
+            tg.send_message(
+                cfg,
+                chat_id,
+                terms.prices_html(cfg),
+                parse_mode="HTML",
+                reply_markup=terms.legal_menu_keyboard(),
+                disable_preview=True,
+            )
+        return True
+
+    if cmd in ("/setprice", "/setprices", "/прайс_ред"):
+        if not is_owner(cfg, user):
+            return True
+        # /setprice bot 400
+        parts = (arg or "").split()
+        if len(parts) >= 2:
+            kind, p_s = parts[0].lower(), parts[1]
+            try:
+                orders.set_base_price(kind, int(float(p_s.replace("₽", ""))))
+                tg.send_message(
+                    cfg,
+                    chat_id,
+                    f"✅ <code>{html.escape(kind)}</code> = <b>{int(float(p_s.replace('₽','')))}</b> ₽\n\n"
+                    + orders.pricing_admin_html(),
+                    parse_mode="HTML",
+                    reply_markup=orders.pricing_admin_keyboard(),
+                )
+            except Exception as e:
+                tg.send_message(
+                    cfg, chat_id, f"⚠️ {html.escape(str(e)[:200])}\n"
+                    f"Пример: <code>/setprice bot 400</code>",
+                    parse_mode="HTML",
+                )
+            return True
         tg.send_message(
             cfg,
             chat_id,
-            terms.prices_html(cfg),
+            orders.pricing_admin_html(),
             parse_mode="HTML",
-            reply_markup=terms.legal_menu_keyboard(),
-            disable_preview=True,
+            reply_markup=orders.pricing_admin_keyboard(),
         )
+        return True
+
+    if cmd in ("/discount", "/скидка"):
+        if not is_owner(cfg, user):
+            return True
+        parts = (arg or "").split()
+        try:
+            if not parts:
+                tg.send_message(
+                    cfg,
+                    chat_id,
+                    "Примеры:\n"
+                    "<code>/discount 10</code> — всем −10%\n"
+                    "<code>/discount bot 20</code> — только Telegram-бот −20%\n"
+                    "<code>/discount 0</code> — снять глобальную",
+                    parse_mode="HTML",
+                    reply_markup=orders.pricing_admin_keyboard(),
+                )
+                return True
+            if len(parts) == 1:
+                orders.set_global_discount(int(float(parts[0].replace("%", ""))))
+            else:
+                kind = parts[0].lower()
+                if kind in orders.ORDER_TYPES:
+                    orders.set_kind_discount(
+                        kind, int(float(parts[1].replace("%", "")))
+                    )
+                else:
+                    orders.set_global_discount(int(float(parts[0].replace("%", ""))))
+            tg.send_message(
+                cfg,
+                chat_id,
+                "✅ Скидка обновлена\n\n" + orders.pricing_admin_html(),
+                parse_mode="HTML",
+                reply_markup=orders.pricing_admin_keyboard(),
+            )
+        except Exception as e:
+            tg.send_message(
+                cfg, chat_id, f"⚠️ {html.escape(str(e)[:200])}", parse_mode="HTML"
+            )
         return True
 
     if cmd in ("/support", "/help_support", "/поддержка", "/контакт"):
@@ -4951,6 +5047,197 @@ def _start_topup_flow(
             f"user <code>{uid}</code> · {pay} ₽ · "
             f"<code>{html.escape(str(top['id']))}</code>",
         )
+    return True
+
+
+def handle_pricing_callback(cfg: dict, state: dict, cq: dict) -> bool:
+    """Владелец: price:menu | kind | set | ask | gdisc | kdisc..."""
+    data = cq.get("data") or ""
+    if not data.startswith("price:"):
+        return False
+    user = cq.get("from") or {}
+    uid = int(user.get("id") or 0)
+    msg = cq.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    mid = msg.get("message_id")
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else "menu"
+
+    def show(text: str, markup: dict | None = None) -> None:
+        if not chat_id:
+            return
+        ui_edit_or_send(
+            cfg,
+            chat_id,
+            text,
+            reply_markup=markup,
+            message_id=mid,
+            state=state,
+            uid=uid,
+            store_key="price_ui_msg",
+        )
+
+    if action == "menu":
+        tg.answer_callback(cfg, cq["id"], "Прайс")
+        show(orders.pricing_admin_html(), orders.pricing_admin_keyboard())
+        return True
+
+    if action == "kind" and len(parts) > 2:
+        kind = parts[2]
+        if kind not in orders.ORDER_TYPES:
+            tg.answer_callback(cfg, cq["id"], "?", show_alert=True)
+            return True
+        meta = orders.ORDER_TYPES[kind]
+        base = orders.base_price(kind)
+        final = orders.effective_price(kind)
+        d = orders.discount_pct_for(kind)
+        tg.answer_callback(cfg, cq["id"], meta.get("title") or kind)
+        show(
+            f"💰 <b>{html.escape(str(meta.get('title') or kind))}</b>\n"
+            f"<code>{html.escape(kind)}</code>\n\n"
+            f"База: <b>{base}</b> ₽\n"
+            f"Скидка: <b>−{d}%</b>\n"
+            f"К оплате: <b>{final}</b> ₽\n\n"
+            f"Выбери новую базу или скидку на этот тип:",
+            orders.pricing_kind_keyboard(kind),
+        )
+        return True
+
+    if action == "set" and len(parts) > 3:
+        kind, p_s = parts[2], parts[3]
+        try:
+            orders.set_base_price(kind, int(p_s))
+            tg.answer_callback(cfg, cq["id"], f"{p_s} ₽")
+        except Exception as e:
+            tg.answer_callback(cfg, cq["id"], str(e)[:100], show_alert=True)
+            return True
+        show(orders.pricing_admin_html(), orders.pricing_admin_keyboard())
+        return True
+
+    if action == "ask" and len(parts) > 2:
+        kind = parts[2]
+        state.setdefault("await", {})[str(uid)] = {
+            "type": "pricing_price",
+            "kind": kind,
+        }
+        save_state(state)
+        tg.answer_callback(cfg, cq["id"], "Жду число")
+        show(
+            f"✏️ Новая <b>базовая</b> цена для <code>{html.escape(kind)}</code>\n"
+            f"Сейчас база {orders.base_price(kind)} ₽ · к оплате {orders.effective_price(kind)} ₽\n\n"
+            f"Пришли число, например <code>400</code>\n"
+            f"Отмена: /cancel",
+            {"inline_keyboard": [[{"text": "◀️ Назад", "callback_data": f"price:kind:{kind}"}]]},
+        )
+        return True
+
+    if action == "gdisc" and len(parts) > 2:
+        try:
+            orders.set_global_discount(int(parts[2]))
+            tg.answer_callback(cfg, cq["id"], f"−{parts[2]}%")
+        except Exception as e:
+            tg.answer_callback(cfg, cq["id"], str(e)[:80], show_alert=True)
+            return True
+        show(orders.pricing_admin_html(), orders.pricing_admin_keyboard())
+        return True
+
+    if action == "gdisc_ask":
+        state.setdefault("await", {})[str(uid)] = {"type": "pricing_gdisc"}
+        save_state(state)
+        tg.answer_callback(cfg, cq["id"], "Жду %")
+        show(
+            "🏷 Глобальная скидка % для <b>всех</b> услуг (0–90).\n"
+            "Пример: <code>15</code>\n"
+            "0 = без скидки. /cancel",
+            {"inline_keyboard": [[{"text": "◀️ Назад", "callback_data": "price:menu"}]]},
+        )
+        return True
+
+    if action == "kdisc" and len(parts) > 3:
+        kind, pct_s = parts[2], parts[3]
+        try:
+            orders.set_kind_discount(kind, int(pct_s))
+            tg.answer_callback(cfg, cq["id"], f"{kind} −{pct_s}%")
+        except Exception as e:
+            tg.answer_callback(cfg, cq["id"], str(e)[:80], show_alert=True)
+            return True
+        show(orders.pricing_admin_html(), orders.pricing_admin_keyboard())
+        return True
+
+    if action == "kdisc_ask" and len(parts) > 2:
+        kind = parts[2]
+        state.setdefault("await", {})[str(uid)] = {
+            "type": "pricing_kdisc",
+            "kind": kind,
+        }
+        save_state(state)
+        tg.answer_callback(cfg, cq["id"], "Жду %")
+        show(
+            f"🏷 Скидка % только для <code>{html.escape(kind)}</code> (0–90).\n"
+            f"Перебивает глобальную. 0 = снять kind-скидку.\n"
+            f"/cancel",
+            {
+                "inline_keyboard": [
+                    [{"text": "◀️ Назад", "callback_data": f"price:kind:{kind}"}]
+                ]
+            },
+        )
+        return True
+
+    tg.answer_callback(cfg, cq["id"], "ok")
+    return True
+
+
+def handle_pricing_await(cfg: dict, state: dict, msg: dict) -> bool:
+    """Await ввода цены / % скидки владельцем."""
+    user = msg.get("from") or {}
+    if not is_owner(cfg, user):
+        return False
+    uid = int(user.get("id") or 0)
+    chat_id = (msg.get("chat") or {}).get("id")
+    text = (msg.get("text") or "").strip()
+    aw = (state.get("await") or {}).get(str(uid)) or {}
+    at = str(aw.get("type") or "")
+    if at not in ("pricing_price", "pricing_gdisc", "pricing_kdisc"):
+        return False
+    if text.lower() in ("/cancel", "отмена", "cancel"):
+        (state.get("await") or {}).pop(str(uid), None)
+        save_state(state)
+        tg.send_message(cfg, chat_id, "Ок, отменил.", parse_mode="HTML")
+        return True
+    # число
+    num_s = text.replace("%", "").replace("₽", "").replace(" ", "").strip()
+    try:
+        num = int(float(num_s.replace(",", ".")))
+    except Exception:
+        tg.send_message(cfg, chat_id, "Нужно число. Пример: <code>400</code>", parse_mode="HTML")
+        return True
+    try:
+        if at == "pricing_price":
+            kind = str(aw.get("kind") or "")
+            orders.set_base_price(kind, num)
+            msg_ok = f"✅ База <code>{html.escape(kind)}</code> = <b>{num}</b> ₽"
+        elif at == "pricing_gdisc":
+            orders.set_global_discount(num)
+            msg_ok = f"✅ Глобальная скидка <b>−{max(0, min(90, num))}%</b>"
+        else:
+            kind = str(aw.get("kind") or "")
+            orders.set_kind_discount(kind, num)
+            msg_ok = (
+                f"✅ Скидка <code>{html.escape(kind)}</code> "
+                f"<b>−{max(0, min(90, num))}%</b>"
+            )
+        (state.get("await") or {}).pop(str(uid), None)
+        save_state(state)
+        tg.send_message(
+            cfg,
+            chat_id,
+            msg_ok + "\n\n" + orders.pricing_admin_html(),
+            parse_mode="HTML",
+            reply_markup=orders.pricing_admin_keyboard(),
+        )
+    except Exception as e:
+        tg.send_message(cfg, chat_id, f"⚠️ {html.escape(str(e)[:200])}", parse_mode="HTML")
     return True
 
 
@@ -9264,6 +9551,9 @@ def run() -> None:
                         elif chat_type == "private":
                             # 0) служебное владельца — ДО всего (redeploy/ping)
                             if handle_owner_system(cfg, state, msg):
+                                continue
+                            # прайс: await цены/скидки
+                            if handle_pricing_await(cfg, state, msg):
                                 continue
                             # владелец: блок/разблок
                             if handle_mod_owner_commands(cfg, state, msg):

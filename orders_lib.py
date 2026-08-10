@@ -27,54 +27,58 @@ _LOCK = threading.Lock()
 
 # Free-слоты отключены. Цена = услуга → фикс. сумма (для банка/Platega).
 FREE_LIMIT = 0
-PRICE_MAX = 600
-PRICE_MIN = 195
+PRICE_MAX = 50_000
+PRICE_MIN = 50  # минимум при ручной правке владельцем
 
-# Услуга → цена (+30% к 4.7.7). Всё. Без «оценок» и плавающих сумм.
+# Базовые (круглые) цены. Переопределяются media/pricing.json владельцем в боте.
 ORDER_TYPES: dict[str, dict[str, Any]] = {
     "design": {
         "title": "Дизайн / обложки",
-        "price": 195,
+        "price": 200,
         "hint": "аватар, обложка, 1–3 картинки",
         "includes": "макеты PNG/JPG по ТЗ",
         "not_includes": "хостинг, печать, брендбук",
     },
     "script": {
         "title": "Скрипт / автоматизация",
-        "price": 260,
+        "price": 250,
         "hint": "парсер, утилита, мелкий скрипт",
         "includes": "скрипт + короткая инструкция",
         "not_includes": "сервер, платные API",
     },
     "bot": {
         "title": "Telegram-бот",
-        "price": 325,
+        "price": 350,
         "hint": "меню, логика, простая админка",
         "includes": "код бота + README",
         "not_includes": "хостинг, VPS",
     },
     "site": {
         "title": "Сайт / лендинг",
-        "price": 325,
+        "price": 350,
         "hint": "1–5 страниц, HTML/простая сборка",
         "includes": "вёрстка/исходники по ТЗ",
         "not_includes": "домен, хостинг, SEO",
     },
     "app": {
         "title": "Приложение (MVP)",
-        "price": 455,
+        "price": 450,
         "hint": "базовый MVP по ТЗ",
         "includes": "функционал по ТЗ",
         "not_includes": "сторы, сервер 24/7",
     },
     "other": {
         "title": "Другое",
-        "price": 325,
+        "price": 350,
         "hint": "задача вне списка",
         "includes": "объём по ТЗ",
         "not_includes": "хостинг, домен, реклама",
     },
 }
+
+# media/pricing.json — живой прайс + скидки (Bothost-диск, не git)
+PRICING_PATH = ROOT / "media" / "pricing.json"
+_pricing_lock = threading.Lock()
 
 STATUS_LABELS = {
     "new": "🆕 новый — ждём принятия",
@@ -217,7 +221,7 @@ def build_brief_from_answers(kind: str, answers: dict) -> str:
         deadline,
         "",
         "5. Рамки тарифа",
-        f"• Фикс-цена: {int(meta.get('price') or PRICE_MIN)} ₽",
+        f"• Фикс-цена: {effective_price(kind)} ₽",
         f"• Входит: {meta.get('includes') or '—'}",
         f"• Не входит: {meta.get('not_includes') or 'хостинг, домен, сторы, 24/7'}",
         "",
@@ -273,7 +277,7 @@ def review_tz_with_ai(
     """
     raw_brief = build_brief_from_answers(kind, answers)
     meta = ORDER_TYPES.get(kind) or ORDER_TYPES["other"]
-    price = int(meta.get("price") or PRICE_MIN)
+    price = effective_price(kind)
     title = str(meta.get("title") or kind)
     includes = str(meta.get("includes") or "")
     not_includes = str(meta.get("not_includes") or "")
@@ -575,28 +579,164 @@ def free_left(state: dict | None = None) -> int:
     return 0
 
 
-def price_of(kind: str) -> int:
+def _default_pricing() -> dict:
+    return {
+        "prices": {},  # kind -> base ₽ override
+        "discount_pct": 0,  # глобальная скидка %
+        "kind_discount": {},  # kind -> % (сильнее глобальной, если задана)
+        "updated_at": 0,
+    }
+
+
+def load_pricing() -> dict:
+    with _pricing_lock:
+        if not PRICING_PATH.exists():
+            return _default_pricing()
+        try:
+            data = json.loads(PRICING_PATH.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return _default_pricing()
+            data.setdefault("prices", {})
+            data.setdefault("discount_pct", 0)
+            data.setdefault("kind_discount", {})
+            if not isinstance(data["prices"], dict):
+                data["prices"] = {}
+            if not isinstance(data["kind_discount"], dict):
+                data["kind_discount"] = {}
+            return data
+        except Exception:
+            return _default_pricing()
+
+
+def save_pricing(data: dict) -> None:
+    with _pricing_lock:
+        data["updated_at"] = int(time.time())
+        PRICING_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = PRICING_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(PRICING_PATH)
+
+
+def default_base_price(kind: str) -> int:
     meta = ORDER_TYPES.get(kind) or ORDER_TYPES["other"]
     return int(meta.get("price") or PRICE_MIN)
+
+
+def base_price(kind: str) -> int:
+    """База без скидки (дефолт или правка владельца)."""
+    pr = load_pricing()
+    ov = (pr.get("prices") or {}).get(str(kind))
+    if ov is not None:
+        try:
+            return max(PRICE_MIN, min(PRICE_MAX, int(ov)))
+        except Exception:
+            pass
+    return default_base_price(kind)
+
+
+def discount_pct_for(kind: str) -> int:
+    """0–90. Сначала персональная по kind, иначе глобальная."""
+    pr = load_pricing()
+    kd = (pr.get("kind_discount") or {}).get(str(kind))
+    if kd is not None:
+        try:
+            return max(0, min(90, int(kd)))
+        except Exception:
+            pass
+    try:
+        return max(0, min(90, int(pr.get("discount_pct") or 0)))
+    except Exception:
+        return 0
+
+
+def effective_price(kind: str) -> int:
+    """Цена к оплате = база − скидка %."""
+    base = base_price(kind)
+    d = discount_pct_for(kind)
+    if d <= 0:
+        return base
+    p = int(round(base * (100 - d) / 100.0))
+    return max(PRICE_MIN, min(PRICE_MAX, p))
+
+
+def set_base_price(kind: str, price: int) -> dict:
+    if kind not in ORDER_TYPES:
+        raise ValueError("unknown kind")
+    price = int(price)
+    if price < PRICE_MIN or price > PRICE_MAX:
+        raise ValueError(f"цена от {PRICE_MIN} до {PRICE_MAX} ₽")
+    pr = load_pricing()
+    pr.setdefault("prices", {})[str(kind)] = price
+    save_pricing(pr)
+    return pr
+
+
+def set_global_discount(pct: int) -> dict:
+    pct = max(0, min(90, int(pct)))
+    pr = load_pricing()
+    pr["discount_pct"] = pct
+    save_pricing(pr)
+    return pr
+
+
+def set_kind_discount(kind: str, pct: int) -> dict:
+    if kind not in ORDER_TYPES:
+        raise ValueError("unknown kind")
+    pct = max(0, min(90, int(pct)))
+    pr = load_pricing()
+    kd = pr.setdefault("kind_discount", {})
+    if pct <= 0:
+        kd.pop(str(kind), None)
+    else:
+        kd[str(kind)] = pct
+    save_pricing(pr)
+    return pr
+
+
+def clear_kind_discount(kind: str) -> dict:
+    return set_kind_discount(kind, 0)
+
+
+def price_of(kind: str) -> int:
+    """Актуальная цена (со скидкой)."""
+    return effective_price(kind)
 
 
 def price_catalog_lines() -> list[str]:
     """Только «услуга — цена» (как надо банку)."""
     lines = []
-    for _k, meta in ORDER_TYPES.items():
-        p = int(meta.get("price") or 0)
-        lines.append(f"• {meta['title']} — <b>{p} ₽</b>")
+    for k, meta in ORDER_TYPES.items():
+        base = base_price(k)
+        final = effective_price(k)
+        d = discount_pct_for(k)
+        if d > 0 and final != base:
+            lines.append(
+                f"• {meta['title']} — <b>{final} ₽</b> "
+                f"<i>(было {base}, −{d}%)</i>"
+            )
+        else:
+            lines.append(f"• {meta['title']} — <b>{final} ₽</b>")
+    g = int(load_pricing().get("discount_pct") or 0)
+    if g > 0:
+        lines.append(f"\n🏷 Глобальная скидка: <b>−{g}%</b>")
     return lines
 
 
 def estimate(kind: str, brief: str) -> dict:
-    """Цена строго из прайса услуги. brief не меняет сумму."""
+    """Цена строго из прайса услуги (± скидка). brief не меняет сумму."""
     meta = ORDER_TYPES.get(kind) or ORDER_TYPES["other"]
-    price = int(meta.get("price") or PRICE_MIN)
+    base = base_price(kind)
+    price = effective_price(kind)
+    d = discount_pct_for(kind)
+    label = "фикс. тариф"
+    if d > 0:
+        label = f"фикс. тариф · скидка −{d}%"
     return {
         "complexity": 1,
-        "complexity_label": "фикс. тариф",
+        "complexity_label": label,
         "price": price,
+        "price_base": base,
+        "discount_pct": d,
         "price_min": price,
         "price_max": price,
         "title": meta["title"],
@@ -604,6 +744,120 @@ def estimate(kind: str, brief: str) -> dict:
         "includes": meta.get("includes") or "",
         "not_includes": meta.get("not_includes") or "",
     }
+
+
+def pricing_admin_html() -> str:
+    import html as H
+
+    pr = load_pricing()
+    g = int(pr.get("discount_pct") or 0)
+    lines = [
+        "💰 <b>Прайс · редактор</b>",
+        "",
+        f"Глобальная скидка: <b>−{g}%</b>",
+        "",
+        "<b>Услуги (база → к оплате):</b>",
+    ]
+    for k, meta in ORDER_TYPES.items():
+        base = base_price(k)
+        final = effective_price(k)
+        d = discount_pct_for(k)
+        kd = (pr.get("kind_discount") or {}).get(k)
+        extra = f" · kind−{kd}%" if kd else ""
+        lines.append(
+            f"• <code>{H.escape(k)}</code> {H.escape(meta['title'])}\n"
+            f"  {base} → <b>{final} ₽</b> (−{d}%{extra})"
+        )
+    lines += [
+        "",
+        "Жми услугу — сменить цену.",
+        "Скидка: глобально или на тип.",
+        "",
+        "<i>Команды:</i>",
+        "<code>/setprice bot 400</code>",
+        "<code>/discount 10</code> — всем −10%",
+        "<code>/discount bot 20</code> — только ботам −20%",
+        "<code>/discount 0</code> — снять глобальную",
+    ]
+    return "\n".join(lines)
+
+
+def pricing_admin_keyboard() -> dict:
+    rows: list[list[dict]] = []
+    row: list[dict] = []
+    for k, meta in ORDER_TYPES.items():
+        title = str(meta.get("title") or k)[:18]
+        row.append({"text": f"{title}", "callback_data": f"price:kind:{k}"})
+        if len(row) >= 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(
+        [
+            {"text": "🏷 −0%", "callback_data": "price:gdisc:0"},
+            {"text": "−10%", "callback_data": "price:gdisc:10"},
+            {"text": "−20%", "callback_data": "price:gdisc:20"},
+            {"text": "−30%", "callback_data": "price:gdisc:30"},
+        ]
+    )
+    rows.append(
+        [
+            {"text": "✏️ Своя скидка %", "callback_data": "price:gdisc_ask"},
+            {"text": "🔄 Обновить", "callback_data": "price:menu"},
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
+def pricing_kind_keyboard(kind: str) -> dict:
+    meta = ORDER_TYPES.get(kind) or {}
+    base = base_price(kind)
+    presets = sorted(
+        {
+            100,
+            150,
+            200,
+            250,
+            300,
+            350,
+            400,
+            450,
+            500,
+            600,
+            700,
+            800,
+            1000,
+            base,
+            max(PRICE_MIN, base - 50),
+            base + 50,
+            base + 100,
+        }
+    )
+    rows: list[list[dict]] = []
+    row: list[dict] = []
+    for p in presets:
+        if p < PRICE_MIN or p > PRICE_MAX:
+            continue
+        row.append({"text": f"{p} ₽", "callback_data": f"price:set:{kind}:{p}"})
+        if len(row) >= 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([{"text": "✏️ Своя сумма", "callback_data": f"price:ask:{kind}"}])
+    rows.append(
+        [
+            {"text": "kind −0%", "callback_data": f"price:kdisc:{kind}:0"},
+            {"text": "−10%", "callback_data": f"price:kdisc:{kind}:10"},
+            {"text": "−20%", "callback_data": f"price:kdisc:{kind}:20"},
+        ]
+    )
+    rows.append(
+        [{"text": "✏️ Скидка % на тип", "callback_data": f"price:kdisc_ask:{kind}"}]
+    )
+    rows.append([{"text": "◀️ Весь прайс", "callback_data": "price:menu"}])
+    return {"inline_keyboard": rows}
 
 
 def create_order(
@@ -812,7 +1066,7 @@ def order_keyboard_types() -> dict:
     }
     rows = [[{"text": "🛠 Выбери услугу", "callback_data": "ord:noop"}]]
     for k, meta in ORDER_TYPES.items():
-        p = int(meta.get("price") or 0)
+        p = effective_price(k)
         title = str(meta.get("title") or k)
         short = title if len(title) < 22 else title[:20] + "…"
         ic = icons.get(k, "•")

@@ -399,12 +399,12 @@ def prices_html(cfg: dict | None = None) -> str:
         catalog = "\n".join(orders.price_catalog_lines())
     except Exception:
         catalog = (
-            "• Дизайн / обложки — <b>100 ₽</b>\n"
-            "• Скрипт / автоматизация — <b>150 ₽</b>\n"
-            "• Telegram-бот — <b>200 ₽</b>\n"
-            "• Сайт / лендинг — <b>200 ₽</b>\n"
-            "• Приложение (MVP) — <b>300 ₽</b>\n"
-            "• Другое — <b>200 ₽</b>"
+            "• Дизайн / обложки — <b>200 ₽</b>\n"
+            "• Скрипт / автоматизация — <b>250 ₽</b>\n"
+            "• Telegram-бот — <b>350 ₽</b>\n"
+            "• Сайт / лендинг — <b>350 ₽</b>\n"
+            "• Приложение (MVP) — <b>450 ₽</b>\n"
+            "• Другое — <b>350 ₽</b>"
         )
 
     pay = (cfg or {}).get("payments") if isinstance((cfg or {}).get("payments"), dict) else {}
