@@ -78,7 +78,7 @@ except ImportError:  # pragma: no cover
 
 _last_queue_tick = 0.0
 # 4.6.8 — orders without Grok ok; hide similar to client; pay gate; balance seed
-BOT_CODE_VERSION = "4.7.9"
+BOT_CODE_VERSION = "4.8.0"
 
 
 def is_owner(cfg: dict, user: dict | None) -> bool:
@@ -168,6 +168,10 @@ def main_menu_keyboard() -> dict:
                 {"text": "🛠  Заказы", "callback_data": "menu:orders"},
             ],
             [
+                {"text": "💰  Прайс / скидки", "callback_data": "menu:prices"},
+                {"text": "⭐  Баллы", "callback_data": "menu:points"},
+            ],
+            [
                 {"text": "💬  Комменты", "callback_data": "menu:comments"},
                 {"text": "📝  Черновики", "callback_data": "menu:drafts"},
             ],
@@ -186,6 +190,7 @@ def owner_more_keyboard() -> dict:
         "inline_keyboard": [
             [{"text": "🧠  Grok / мозг", "callback_data": "menu:brains"}],
             [{"text": "💰  Балансы", "callback_data": "menu:balance"}],
+            [{"text": "🏷  Прайс / скидки", "callback_data": "menu:prices"}],
             [
                 {"text": "📡  Радар", "callback_data": "menu:radar"},
                 {"text": "🔥  Горящие", "callback_data": "menu:hot"},
@@ -332,6 +337,26 @@ def owner_home_html() -> str:
         pass
     o_block = f"🛠  <b>Заказы</b>  ·  в работе  <code>{ord_n}</code>"
 
+    # прайс / скидка
+    p_block = "💰  <b>Прайс</b>  ·  /prices"
+    try:
+        pr = orders.load_pricing()
+        g = int(pr.get("discount_pct") or 0)
+        bot_p = orders.effective_price("bot")
+        site_p = orders.effective_price("site")
+        if g > 0:
+            p_block = (
+                f"💰  <b>Прайс</b>  ·  скидка <code>−{g}%</code>\n"
+                f"     бот <code>{bot_p}</code> ₽ · сайт <code>{site_p}</code> ₽"
+            )
+        else:
+            p_block = (
+                f"💰  <b>Прайс</b>  ·  бот <code>{bot_p}</code> ₽ · "
+                f"сайт <code>{site_p}</code> ₽"
+            )
+    except Exception:
+        pass
+
     return (
         f"✦  <b>Вагго</b>  ·  пульт\n"
         f"{ch_status}  ·  <code>{BOT_CODE_VERSION}</code>\n"
@@ -340,7 +365,8 @@ def owner_home_html() -> str:
         f"{gw_block}\n\n"
         f"{q_block}\n\n"
         f"{c_block}\n"
-        f"{o_block}\n\n"
+        f"{o_block}\n"
+        f"{p_block}\n\n"
         f"{'─' * 18}\n"
         f"<i>Раздел — кнопки ниже</i>\n"
         f"<i>Пропал пульт —</i>  /menu  <i>или</i>  «Обновить»"
@@ -1718,11 +1744,38 @@ def handle_owner_menu_callback(
             uid_m,
             f"⚙️  <b>Ещё · сервис</b>\n"
             f"{'─' * 18}\n\n"
-            f"Grok · касса · радар\n"
+            f"Grok · касса · прайс · радар\n"
             f"restore · кнопки GW · чистка\n\n"
             f"<i>Или напиши:</i> «какие заказы горят»\n"
             f"<i>Назад — в пульт</i>",
             owner_more_keyboard(),
+        )
+        return True
+    if raw in ("prices", "price", "pricing", "прайс"):
+        _owner_panel(
+            cfg,
+            state,
+            chat_id,
+            mid,
+            uid_m,
+            orders.pricing_admin_html()
+            + "\n\n<code>/setprice bot 400</code> · "
+            "<code>/discount 10</code>",
+            orders.pricing_admin_keyboard(),
+        )
+        return True
+    if raw in ("points", "баллы"):
+        pts = bal.get_points(int(uid or 0))
+        _owner_panel(
+            cfg,
+            state,
+            chat_id,
+            mid,
+            uid_m,
+            bal.format_points_help()
+            + f"\n\nТвои баллы (тест): <b>{pts}</b> ⭐\n"
+            f"<i>Клиентам: /points</i>",
+            bal.points_keyboard(),
         )
         return True
     if raw == "radar":

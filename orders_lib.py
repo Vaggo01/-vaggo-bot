@@ -807,6 +807,7 @@ def pricing_admin_keyboard() -> dict:
             {"text": "🔄 Обновить", "callback_data": "price:menu"},
         ]
     )
+    rows.append([{"text": "«  В пульт", "callback_data": "menu:home"}])
     return {"inline_keyboard": rows}
 
 
